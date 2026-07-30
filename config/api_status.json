@@ -1,0 +1,326 @@
+{
+  "configured": {
+    "Censys": [
+      "CENSYS_ID",
+      "CENSYS_SECRET"
+    ],
+    "Hunter": [
+      "HUNTER_KEY"
+    ],
+    "Intelx": [
+      "INTELX_KEY"
+    ],
+    "Leakix": [
+      "LEAKIX_KEY"
+    ],
+    "Shodan": [
+      "SHODAN_KEY"
+    ],
+    "Virustotal": [
+      "VIRUSTOTAL_KEY"
+    ],
+    "Builtwith": [
+      "BUILTWITH_KEY"
+    ],
+    "Bevigil": [
+      "BEVIGIL_KEY"
+    ],
+    "Dnsdumpster": [
+      "DNSDUMPSTER_KEY"
+    ],
+    "Netlas": [
+      "NETLAS_KEY"
+    ],
+    "Bitbucket": [
+      "BITBUCKET_KEY"
+    ],
+    "AbstractapiCompanyenrichment": [
+      "ABSTRACTAPI_COMPANYENRICHMENT_KEY"
+    ],
+    "AbstractapiIpgeolocation": [
+      "ABSTRACTAPI_IPGEOLOCATION_KEY"
+    ],
+    "AbstractapiPhonevalidation": [
+      "ABSTRACTAPI_PHONEVALIDATION_KEY"
+    ],
+    "Abuseipdb": [
+      "ABUSEIPDB_KEY"
+    ],
+    "Greynoise": [
+      "GREYNOISE_KEY"
+    ],
+    "Pulsedive": [
+      "PULSEDIVE_KEY"
+    ],
+    "Invocation": [
+      "INVOCATION_ID"
+    ],
+    "PamKwallet5": [
+      "PAM_KWALLET5_LOGIN"
+    ],
+    "ShellSession": [
+      "SHELL_SESSION_ID"
+    ],
+    "XdgSession": [
+      "XDG_SESSION_ID"
+    ]
+  },
+  "missing": {
+    "Fullhunt": [
+      "FULLHUNT_KEY"
+    ],
+    "Securitytrails": [
+      "SECURITYTRAILS_KEY"
+    ],
+    "Hibp": [
+      "HIBP_KEY"
+    ],
+    "Projectdiscovery": [
+      "PROJECTDISCOVERY_KEY"
+    ],
+    "Dehashed": [
+      "DEHASHED_KEY",
+      "DEHASHED_USERNAME"
+    ],
+    "Onyphe": [
+      "ONYPHE_KEY"
+    ],
+    "Brave": [
+      "BRAVE_KEY"
+    ],
+    "Bufferoverun": [
+      "BUFFEROVERUN_KEY"
+    ],
+    "Criminalip": [
+      "CRIMINALIP_KEY"
+    ],
+    "Dymo": [
+      "DYMO_KEY"
+    ],
+    "Tomba": [
+      "TOMBA_KEY",
+      "TOMBA_SECRET"
+    ],
+    "Venacus": [
+      "VENACUS_KEY"
+    ],
+    "Windvane": [
+      "WINDVANE_KEY"
+    ],
+    "Github": [
+      "GITHUB_KEY"
+    ],
+    "Hackertarget": [
+      "HACKERTARGET_KEY"
+    ],
+    "Fofa": [
+      "FOFA_EMAIL",
+      "FOFA_KEY"
+    ],
+    "Sherlockeye": [
+      "SHERLOCKEYE_KEY"
+    ],
+    "Mojeek": [
+      "MOJEEK_KEY"
+    ],
+    "Pentesttools": [
+      "PENTESTTOOLS_KEY"
+    ],
+    "Rocketreach": [
+      "ROCKETREACH_KEY"
+    ],
+    "Securityscorecard": [
+      "SECURITYSCORECARD_KEY"
+    ],
+    "Whoisxml": [
+      "WHOISXML_KEY"
+    ],
+    "Abusix": [
+      "ABUSIX_KEY"
+    ],
+    "Badpackets": [
+      "BADPACKETS_KEY"
+    ],
+    "Binaryedge": [
+      "BINARYEDGE_KEY"
+    ],
+    "Bitcoinabuse": [
+      "BITCOINABUSE_KEY"
+    ],
+    "Bitcoinwhoswho": [
+      "BITCOINWHOSWHO_KEY"
+    ],
+    "Botscout": [
+      "BOTSCOUT_KEY"
+    ],
+    "C99": [
+      "C99_KEY"
+    ],
+    "Circllu": [
+      "CIRCLLU_LOGIN",
+      "CIRCLLU_PASSWORD"
+    ],
+    "Citadel": [
+      "CITADEL_KEY"
+    ],
+    "Clearbit": [
+      "CLEARBIT_KEY"
+    ],
+    "Dnsdb": [
+      "DNSDB_KEY"
+    ],
+    "Emailcrawlr": [
+      "EMAILCRAWLR_KEY"
+    ],
+    "Emailrep": [
+      "EMAILREP_KEY"
+    ],
+    "Etherscan": [
+      "ETHERSCAN_KEY"
+    ],
+    "Focsec": [
+      "FOCSEC_KEY"
+    ],
+    "Fraudguard": [
+      "FRAUDGUARD_ACCOUNT",
+      "FRAUDGUARD_PASSWORD"
+    ],
+    "Fullcontact": [
+      "FULLCONTACT_KEY"
+    ],
+    "Googlemaps": [
+      "GOOGLEMAPS_KEY"
+    ],
+    "GoogleSafebrowsing": [
+      "GOOGLE_SAFEBROWSING_KEY"
+    ],
+    "Grayhatwarfare": [
+      "GRAYHATWARFARE_KEY"
+    ],
+    "Honeypot": [
+      "HONEYPOT_KEY"
+    ],
+    "Hostio": [
+      "HOSTIO_KEY"
+    ],
+    "HybridAnalysis": [
+      "HYBRID_ANALYSIS_KEY"
+    ],
+    "Iknowwhatyoudownload": [
+      "IKNOWWHATYOUDOWNLOAD_KEY"
+    ],
+    "Ipapicom": [
+      "IPAPICOM_KEY"
+    ],
+    "Ipinfo": [
+      "IPINFO_KEY"
+    ],
+    "Ipqualityscore": [
+      "IPQUALITYSCORE_KEY"
+    ],
+    "Ipregistry": [
+      "IPREGISTRY_KEY"
+    ],
+    "Ipstack": [
+      "IPSTACK_KEY"
+    ],
+    "Jsonwhoiscom": [
+      "JSONWHOISCOM_KEY"
+    ],
+    "Malwarepatrol": [
+      "MALWAREPATROL_KEY"
+    ],
+    "Metadefender": [
+      "METADEFENDER_KEY"
+    ],
+    "Nameapi": [
+      "NAMEAPI_KEY"
+    ],
+    "Networksdb": [
+      "NETWORKSDB_KEY"
+    ],
+    "Neutrinoapi": [
+      "NEUTRINOAPI_KEY"
+    ],
+    "Numverify": [
+      "NUMVERIFY_KEY"
+    ],
+    "Onioncity": [
+      "ONIONCITY_KEY"
+    ],
+    "Opencorporates": [
+      "OPENCORPORATES_KEY"
+    ],
+    "Pastebin": [
+      "PASTEBIN_KEY"
+    ],
+    "Recondev": [
+      "RECONDEV_KEY"
+    ],
+    "Riskiq": [
+      "RISKIQ_LOGIN",
+      "RISKIQ_PASSWORD"
+    ],
+    "Seon": [
+      "SEON_KEY"
+    ],
+    "Snov": [
+      "SNOV_CLIENT_ID",
+      "SNOV_CLIENT_SECRET"
+    ],
+    "Sociallinks": [
+      "SOCIALLINKS_KEY"
+    ],
+    "Spur": [
+      "SPUR_KEY"
+    ],
+    "Spyonweb": [
+      "SPYONWEB_KEY"
+    ],
+    "Spyse": [
+      "SPYSE_KEY"
+    ],
+    "Stackoverflow": [
+      "STACKOVERFLOW_KEY"
+    ],
+    "Textmagic": [
+      "TEXTMAGIC_KEY",
+      "TEXTMAGIC_USERNAME"
+    ],
+    "Trashpanda": [
+      "TRASHPANDA_PASSWORD",
+      "TRASHPANDA_USERNAME"
+    ],
+    "TwilioAccount": [
+      "TWILIO_ACCOUNT_SID"
+    ],
+    "TwilioAuth": [
+      "TWILIO_AUTH_TOKEN"
+    ],
+    "Viewdns": [
+      "VIEWDNS_KEY"
+    ],
+    "Whatcms": [
+      "WHATCMS_KEY"
+    ],
+    "Whoisology": [
+      "WHOISOLOGY_KEY"
+    ],
+    "Whoxy": [
+      "WHOXY_KEY"
+    ],
+    "Wigle": [
+      "WIGLE_KEY"
+    ],
+    "Xforce": [
+      "XFORCE_KEY",
+      "XFORCE_PASSWORD"
+    ],
+    "Zetalytics": [
+      "ZETALYTICS_KEY"
+    ],
+    "ApifyApi": [
+      "APIFY_API_TOKEN"
+    ]
+  }
+}

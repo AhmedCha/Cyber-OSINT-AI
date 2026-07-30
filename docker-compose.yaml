@@ -1,0 +1,66 @@
+services:
+  # =====================================================================
+  # LONG-RUNNING PERSISTENT SERVICES
+  # =====================================================================
+
+  # SpiderFoot: Persistent Web UI/API server
+  # Run via: docker compose up -d spiderfoot (Access at http://localhost:5001)
+  spiderfoot:
+    image: smicallef/spiderfoot:latest
+    container_name: osint_spiderfoot
+    ports:
+      - "5001:5001"
+    restart: unless-stopped
+
+  # =====================================================================
+  # ON-DEMAND CLI TOOLS
+  # Invoke via: docker compose run --rm <service> <args>
+  # =====================================================================
+
+  # Amass: Official Docker Image
+  amass:
+    image: caffix/amass:latest
+    container_name: osint_amass
+    entrypoint: ["amass"]
+
+  # Reacher (check-if-email-exists): Official Docker Image
+  reacher:
+    image: reacherhq/check-if-email-exists:latest
+    container_name: osint_reacher
+    entrypoint: ["check-if-email-exists"]
+
+  # theHarvester: Custom Python Slim Build
+  theharvester:
+    build:
+      context: ./dockerfiles
+      dockerfile: Dockerfile.theharvester
+    image: osint-local/theharvester:latest
+    container_name: osint_theharvester
+    entrypoint: ["theHarvester"]
+
+  # CertSpotter: Custom Golang/Debian Build
+  certspotter:
+    build:
+      context: ./dockerfiles
+      dockerfile: Dockerfile.certspotter
+    image: osint-local/certspotter:latest
+    container_name: osint_certspotter
+    entrypoint: ["certspotter"]
+
+  # maigret: Custom Python Slim Build
+  maigret:
+    build:
+      context: ./dockerfiles
+      dockerfile: Dockerfile.maigret
+    image: osint-local/maigret:latest
+    container_name: osint_maigret
+    entrypoint: ["maigret"]
+
+  # Metagoofil: Custom Python Slim Build
+  metagoofil:
+    build:
+      context: ./dockerfiles
+      dockerfile: Dockerfile.metagoofil
+    image: osint-local/metagoofil:latest
+    container_name: osint_metagoofil
+    entrypoint: ["metagoofil"]

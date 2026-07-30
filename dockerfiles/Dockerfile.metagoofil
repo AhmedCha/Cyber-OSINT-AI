@@ -1,0 +1,17 @@
+FROM python:3.11-slim
+WORKDIR /app
+
+# Install git so we can clone the repository
+RUN apt-get update && apt-get install -y --no-install-recommends \
+  git \
+  && rm -rf /var/lib/apt/lists/*
+
+# Clone the actively maintained opsdisk fork directly into /app
+RUN git clone https://github.com/opsdisk/metagoofil.git .
+
+# Install Python dependencies if a requirements file exists, otherwise install requests/urllib3 (standard for Metagoofil)
+RUN if [ -f requirements.txt ]; then pip install --no-cache-dir -r requirements.txt; else pip install --no-cache-dir requests urllib3; fi
+
+# Make the main script executable and set it as the entrypoint
+RUN chmod +x metagoofil.py
+ENTRYPOINT ["python", "/app/metagoofil.py"]

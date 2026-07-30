@@ -1,0 +1,20 @@
+FROM python:3.11-slim
+WORKDIR /app
+
+# Install git so we can clone the repository
+RUN apt-get update && apt-get install -y --no-install-recommends \
+  git \
+  && rm -rf /var/lib/apt/lists/*
+
+# Install uv for modern dependency management per theHarvester's docs
+RUN pip install --no-cache-dir uv
+
+# Clone the official repository directly into /app
+RUN git clone https://github.com/laramies/theHarvester.git .
+
+# Sync dependencies using uv (creates a managed venv in /app/.venv)
+RUN uv sync --frozen --no-dev
+
+# Make the main script executable and execute via uv run
+RUN chmod +x theHarvester.py
+ENTRYPOINT ["uv", "run", "theHarvester.py"]

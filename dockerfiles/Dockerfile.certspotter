@@ -1,0 +1,11 @@
+# Use golang:latest so it satisfies newer Go toolchain requirements (>= 1.25.0)
+FROM golang:latest AS builder
+RUN go install software.sslmate.com/src/certspotter/cmd/certspotter@latest
+
+# Final lightweight stage
+FROM debian:bookworm-slim
+RUN apt-get update && apt-get install -y --no-install-recommends \
+  ca-certificates \
+  && rm -rf /var/lib/apt/lists/*
+COPY --from=builder /go/bin/certspotter /usr/local/bin/certspotter
+ENTRYPOINT ["certspotter"]

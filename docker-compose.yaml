@@ -6,10 +6,13 @@ services:
   # SpiderFoot: Persistent Web UI/API server
   # Run via: docker compose up -d spiderfoot (Access at http://localhost:5001)
   spiderfoot:
-    image: smicallef/spiderfoot:latest
+    build:
+      context: https://github.com/smicallef/spiderfoot.git
     container_name: osint_spiderfoot
     ports:
       - "5001:5001"
+    volumes:
+      - "./volumes/spiderfoot:/var/lib/spiderfoot"
     restart: unless-stopped
 
   # =====================================================================
@@ -36,6 +39,8 @@ services:
       dockerfile: Dockerfile.theharvester
     image: osint-local/theharvester:latest
     container_name: osint_theharvester
+    volumes:
+      - "./volumes/theharvester/api-keys.yaml:/app/api-keys.yaml:ro"
     entrypoint: ["theHarvester"]
 
   # CertSpotter: Custom Golang/Debian Build

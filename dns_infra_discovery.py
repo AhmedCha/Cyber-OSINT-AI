@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import argparse
 import json
 import logging
 import re
@@ -10,10 +11,6 @@ from typing import Dict, List, Set
 # CONFIGURATION & LOGGING SETUP
 # =====================================================================
 
-INPUT_FILE = Path("output/domains.json")
-OUTPUT_DIR = Path("output")
-OUTPUT_FILE = OUTPUT_DIR / "dns_infra.json"
-
 logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s",
@@ -24,6 +21,11 @@ logger = logging.getLogger(__name__)
 # =====================================================================
 # HELPER FUNCTIONS
 # =====================================================================
+
+
+def slugify_company(name: str) -> str:
+    """Lowercase, replace non-alphanumeric runs with a single hyphen, strip leading/trailing hyphens."""
+    return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
 
 
 def normalize_subdomain(raw_subdomain: str, root_domain: str) -> str:
@@ -111,22 +113,44 @@ def run_amass(domain: str) -> Set[str]:
 
 
 def main():
+    parser = argparse.ArgumentParser(
+        description="OSINT Stage: DNS Infrastructure & Subdomain Discovery"
+    )
+    parser.add_argument(
+        "--company",
+        required=False,
+        help="Target company name for output folder organization",
+    )
+    args = parser.parse_args()
+
+    if args.company:
+        company_slug = slugify_company(args.company)
+    else:
+        company_slug = "default"
+
+    output_dir = Path("output") / company_slug
+    input_file = output_dir / "domains.json"
+    output_file = output_dir / "dns_infra.json"
+
+    if not input_file.exists() and Path("output/domains.json").exists():
+        input_file = Path("output/domains.json")
+
     logger.info(
         "Starting DNS infrastructure & subdomain discovery pipeline (Stage 2)..."
     )
 
     # 1. Read input from Stage 1
-    if not INPUT_FILE.exists():
+    if not input_file.exists():
         logger.error(
-            f"Input file {INPUT_FILE} not found! Please run domain_discovery.py first."
+            f"Input file {input_file} not found! Please run domain_discovery.py first."
         )
         return
 
     try:
-        with open(INPUT_FILE, "r", encoding="utf-8") as f:
+        with open(input_file, "r", encoding="utf-8") as f:
             validated_domains = json.load(f)
     except Exception as e:
-        logger.error(f"Failed to read or parse {INPUT_FILE}: {e}")
+        logger.error(f"Failed to read or parse {input_file}: {e}")
         return
 
     if not validated_domains:
@@ -168,8 +192,8 @@ def main():
         }
 
     # 3. Write Final JSON Output
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    with open(output_file, "w", encoding="utf-8") as f:
         json.dump(infra_results, f, indent=2)
 
     # 4. Console Summary
@@ -183,7 +207,7 @@ def main():
             f"{domain:<25} | {stats['total']:<8} | {stats['certspotter']:<11} | {stats['amass']}"
         )
     print("=" * 65)
-    print(f"\nFinal output written to: {OUTPUT_FILE.resolve()}")
+    print(f"\nFinal output written to: {output_file.resolve()}")
 
 
 if __name__ == "__main__":

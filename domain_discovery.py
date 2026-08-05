@@ -15,9 +15,6 @@ from typing import Dict, List, Set
 # =====================================================================
 
 CONFIG_FILE = Path("config/api_status.json")
-INPUT_FILE = Path("output/candidate_domains.json")
-OUTPUT_DIR = Path("output")
-OUTPUT_FILE = OUTPUT_DIR / "domains.json"
 
 logging.basicConfig(
     level=logging.INFO,
@@ -29,6 +26,11 @@ logger = logging.getLogger(__name__)
 # =====================================================================
 # HELPER FUNCTIONS
 # =====================================================================
+
+
+def slugify_company(name: str) -> str:
+    """Lowercase, replace non-alphanumeric runs with a single hyphen, strip leading/trailing hyphens."""
+    return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
 
 
 def log_api_status_summary():
@@ -217,24 +219,43 @@ def main():
         required=False,
         help="Direct target domain override (e.g. 'example.com')",
     )
+    parser.add_argument(
+        "--company",
+        required=False,
+        help="Target company name for output folder organization",
+    )
     args = parser.parse_args()
+
+    if args.company:
+        company_slug = slugify_company(args.company)
+    elif args.domain:
+        company_slug = slugify_company(args.domain.split(".")[0])
+    else:
+        company_slug = "default"
+
+    output_dir = Path("output") / company_slug
+    input_file = output_dir / "candidate_domains.json"
+    output_file = output_dir / "domains.json"
+
+    if not input_file.exists() and Path("output/candidate_domains.json").exists():
+        input_file = Path("output/candidate_domains.json")
 
     # 1. Resolve Target Domain(s)
     target_domains = []
     if args.domain:
         target_domains = [args.domain]
-    elif INPUT_FILE.exists():
-        logger.info(f"Reading candidate domains from Stage 1 output ({INPUT_FILE})...")
+    elif input_file.exists():
+        logger.info(f"Reading candidate domains from Stage 1 output ({input_file})...")
         try:
-            with open(INPUT_FILE, "r", encoding="utf-8") as f:
+            with open(input_file, "r", encoding="utf-8") as f:
                 data = json.load(f)
                 target_domains = [item["domain"] for item in data if "domain" in item]
         except Exception as e:
-            logger.error(f"Failed to read {INPUT_FILE}: {e}")
+            logger.error(f"Failed to read {input_file}: {e}")
             return
     else:
         logger.error(
-            f"No domain specified and {INPUT_FILE} not found. Run name_to_domain.py first or pass --domain."
+            f"No domain specified and {input_file} not found. Run name_to_domain.py first or pass --domain."
         )
         return
 
@@ -288,9 +309,9 @@ def main():
 
     validated_domains.sort(key=lambda x: x["domain"])
 
-    # 5. Write Final JSON Output (output/domains.json for downstream compatibility)
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
+    # 5. Write Final JSON Output
+    output_dir.mkdir(parents=True, exist_ok=True)
+    with open(output_file, "w", encoding="utf-8") as f:
         json.dump(validated_domains, f, indent=2)
 
     # 6. Console Summary
@@ -310,7 +331,7 @@ def main():
     else:
         print("No resolving domains were discovered.")
     print("=" * 50)
-    print(f"\nFinal output written to: {OUTPUT_FILE.resolve()}")
+    print(f"\nFinal output written to: {output_file.resolve()}")
 
 
 if __name__ == "__main__":

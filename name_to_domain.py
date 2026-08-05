@@ -14,8 +14,6 @@ from typing import Dict, List, Set
 # =====================================================================
 
 SEARXNG_URL = "http://localhost:8080/search"
-OUTPUT_DIR = Path("output")
-OUTPUT_FILE = OUTPUT_DIR / "candidate_domains.json"
 
 # Common non-company platforms to exclude from search results
 DENYLIST_DOMAINS = (
@@ -44,6 +42,11 @@ logger = logging.getLogger(__name__)
 # =====================================================================
 # HELPER FUNCTIONS
 # =====================================================================
+
+
+def slugify_company(name: str) -> str:
+    """Lowercase, replace non-alphanumeric runs with a single hyphen, strip leading/trailing hyphens."""
+    return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
 
 
 def normalize_domain(raw_domain: str) -> str:
@@ -159,6 +162,11 @@ def main():
     args = parser.parse_args()
 
     company_name = args.company
+    company_slug = slugify_company(company_name)
+
+    output_dir = Path("output") / company_slug
+    output_file = output_dir / "candidate_domains.json"
+
     logger.info(
         f"Starting name-to-domain candidate discovery for company: {company_name}"
     )
@@ -189,8 +197,8 @@ def main():
     validated_domains.sort(key=lambda x: x["domain"])
 
     # 3. Save Output
-    OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
-    with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    with open(output_file, "w", encoding="utf-8") as f:
         json.dump(validated_domains, f, indent=2)
 
     # 4. Console Summary
@@ -209,7 +217,7 @@ def main():
     else:
         print("No resolving root domains were discovered.")
     print("=" * 50)
-    print(f"\nCandidate domain list written to: {OUTPUT_FILE.resolve()}")
+    print(f"\nCandidate domain list written to: {output_file.resolve()}")
 
 
 if __name__ == "__main__":

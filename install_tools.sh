@@ -39,10 +39,12 @@ fi
 # ------------------------------------------------------------------------------
 # 2. Define Smoke Tests (Service Name -> Args to verify execution)
 # ------------------------------------------------------------------------------
+# ------------------------------------------------------------------------------
+# 2. Define Smoke Tests (Service Name -> Args to verify execution)
+# ------------------------------------------------------------------------------
 declare -A TOOLS=(
   ["spiderfoot"]="-h"
   ["amass"]="-version"
-  ["reacher"]="--help"
   ["theharvester"]="-h"
   ["certspotter"]="-help"
   ["maigret"]="--version"

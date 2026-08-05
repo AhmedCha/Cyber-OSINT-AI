@@ -15,6 +15,5 @@ RUN git clone https://github.com/laramies/theHarvester.git .
 # Sync dependencies using uv (creates a managed venv in /app/.venv)
 RUN uv sync --frozen --no-dev
 
-# Make the main script executable and execute via uv run
-RUN chmod +x theHarvester.py
-ENTRYPOINT ["uv", "run", "theHarvester.py"]
+# Execute via uv run using the module command instead of the missing .py file
+ENTRYPOINT ["uv", "run", "theHarvester"]

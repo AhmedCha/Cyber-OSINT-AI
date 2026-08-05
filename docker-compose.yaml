@@ -3,8 +3,6 @@ services:
   # LONG-RUNNING PERSISTENT SERVICES
   # =====================================================================
 
-  # SpiderFoot: Persistent Web UI/API server
-  # Run via: docker compose up -d spiderfoot (Access at http://localhost:5001)
   spiderfoot:
     build:
       context: https://github.com/smicallef/spiderfoot.git
@@ -15,37 +13,31 @@ services:
       - "./volumes/spiderfoot:/var/lib/spiderfoot"
     restart: unless-stopped
 
-  # Tor: SOCKS5 proxy gateway (dperson/torproxy - actively maintained,
-  # 50M+ pulls). Used by maigret's --tor-proxy for a free, no-signup way
-  # to route checks and evade per-site rate limits. Takes a little while
-  # to bootstrap on first start - give it a few seconds before running
-  # maigret against it for the first time.
   tor:
     image: dperson/torproxy
     container_name: osint_tor
     restart: unless-stopped
     ports:
-      - "9050:9050" # SOCKS5 proxy
-      - "8118:8118" # Privoxy HTTP proxy (optional, not used by maigret)
+      - "9052:9050" 
+      - "8119:8118" 
+
+  reacher:
+    image: reacherhq/backend:latest
+    container_name: osint_reacher
+    ports:
+      - "8080:8080"
+    restart: unless-stopped
 
   # =====================================================================
   # ON-DEMAND CLI TOOLS
   # Invoke via: docker compose run --rm <service> <args>
   # =====================================================================
 
-  # Amass: Official Docker Image
   amass:
     image: caffix/amass:latest
     container_name: osint_amass
     entrypoint: ["amass"]
 
-  # Reacher (check-if-email-exists): Official Docker Image
-  reacher:
-    image: reacherhq/check-if-email-exists:latest
-    container_name: osint_reacher
-    entrypoint: ["check-if-email-exists"]
-
-  # theHarvester: Custom Python Slim Build
   theharvester:
     build:
       context: ./dockerfiles
@@ -54,9 +46,7 @@ services:
     container_name: osint_theharvester
     volumes:
       - "./volumes/theharvester/api-keys.yaml:/app/api-keys.yaml:ro"
-    entrypoint: ["theHarvester"]
 
-  # CertSpotter: Custom Golang/Debian Build
   certspotter:
     build:
       context: ./dockerfiles
@@ -65,7 +55,6 @@ services:
     container_name: osint_certspotter
     entrypoint: ["certspotter"]
 
-  # maigret: Custom Python Slim Build
   maigret:
     build:
       context: ./dockerfiles
@@ -76,7 +65,6 @@ services:
     depends_on:
       - tor
 
-  # Metagoofil: Custom Python Slim Build
   metagoofil:
     build:
       context: ./dockerfiles

@@ -1,14 +1,11 @@
 #!/usr/bin/env python3
 import argparse
-import json
 import logging
 import os
 import re
-import subprocess
 import tempfile
-import unicodedata
 from pathlib import Path
-from typing import Dict, List, Optional, Set
+from typing import Any, Dict, List, Optional, Set, Tuple
 
 import requests
 
@@ -17,35 +14,26 @@ try:
 except ImportError:  # pragma: no cover
     ApifyClient = None
 
+# Hypothetical shared library imports to prepare for pipeline modularity
+from lib.common import setup_logging, slugify_company, strip_accents
+from lib.config import load_env_file
+from lib.docker_runner import run_docker_service_up, run_docker_tool
+from lib.json_utils import load_json, save_json
+
 # =====================================================================
-# CONFIGURATION & LOGGING SETUP
+# CONFIGURATION & CONSTANTS
 # =====================================================================
 
 ENV_FILE = Path(".env")
 
-# harvestapi/linkedin-profile-search-by-services - confirmed actor ID from
-# your script. It's a keyword/services search, NOT a company-page-scoped
-# scraper, so there's no native "give me this company's employees" input.
-# We approximate that by searching on a company-name string derived from
-# the domain (or an explicit --company-name override) and keeping only
-# results whose current/company website or LinkedIn company URL lines up
-# with the target domain. Override the actor via APIFY_ACTOR_ID in .env.
 DEFAULT_APIFY_ACTOR_ID = "qXMa8kADnUQdmz18G"
 DEFAULT_MAX_ITEMS_PER_DOMAIN = 50
 
-# A few common first/last name -> username patterns. Kept intentionally
-# simple per spec; extend later if maigret hit-rate is low.
 USERNAME_PATTERN_NAMES = ["firstlast", "first.last", "flast"]
 
-# Jina AI Reader (https://r.jina.ai/) - free text-extraction proxy used to
-# double-check maigret "Claimed" hits before trusting them. Works without
-# a key at a lower rate limit; set JINA_API_KEY in .env for higher limits.
 JINA_READER_BASE = "https://r.jina.ai/"
 JINA_TIMEOUT_SECS = 20
 
-# Heuristic markers for "this is a dead-end / not-found page", checked
-# against the lowercased extracted text. Deliberately conservative - a
-# false "looks valid" is cheaper than a false "discarded a real hit".
 INVALID_PAGE_MARKERS = [
     "404",
     "page not found",
@@ -66,12 +54,6 @@ INVALID_PAGE_MARKERS = [
     "this account doesn't exist",
 ]
 
-# Curated list of high-traffic, well-maintained social platforms - checking
-# only these instead of maigret's default top-500 (which includes lots of
-# small/dead/irrelevant sites) is both faster and lower-noise. Names must
-# match maigret's site database exactly (case-sensitive) - verified against
-# the installed maigret 0.6.3 database. Override via MAIGRET_SITES in .env
-# (comma-separated) if you want a different set.
 DEFAULT_POPULAR_SITES = [
     "Instagram",
     "Twitter",
@@ -90,30 +72,10 @@ DEFAULT_POPULAR_SITES = [
     "GitHub",
 ]
 
-# Optional: route maigret's own requests through a proxy (helps evade
-# per-site rate limits). Set MAIGRET_PROXY_URL in .env, e.g.
-# socks5://127.0.0.1:1080 or http://user:pass@host:port. Left unset by
-# default (no --proxy flag passed).
 MAIGRET_PROXY_ENV_VAR = "MAIGRET_PROXY_URL"
-
-# Free alternative to a paid proxy: a local Tor SOCKS5 gateway, passed via
-# maigret's dedicated --tor-proxy flag (separate from --proxy above). Set
-# MAIGRET_TOR_PROXY_URL in .env, e.g. socks5://127.0.0.1:9050 - but you
-# need an actual Tor daemon (or tor docker container) listening there;
-# maigret doesn't start one for you.
 MAIGRET_TOR_PROXY_ENV_VAR = "MAIGRET_TOR_PROXY_URL"
 
-# NOTE on custom headers: maigret's CLI/settings.json don't expose a
-# generic "override headers for every site" option - headers are defined
-# per-site inside its own data.json. There's no flag to add here for that;
-# doing it would mean patching maigret's site database directly, which is
-# out of scope for this script.
-
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s [%(levelname)s] %(message)s",
-    datefmt="%H:%M:%S",
-)
+# Initialize module logger
 logger = logging.getLogger(__name__)
 
 # =====================================================================
@@ -121,53 +83,11 @@ logger = logging.getLogger(__name__)
 # =====================================================================
 
 
-def slugify_company(name: str) -> str:
-    """Lowercase, replace non-alphanumeric runs with a single hyphen, strip leading/trailing hyphens."""
-    return re.sub(r"[^a-z0-9]+", "-", name.lower()).strip("-")
-
-
-def load_env_file():
-    """Minimal .env loader (KEY=VALUE per line) so we don't add a hard
-    dependency on python-dotenv. Existing environment variables win."""
-    if not ENV_FILE.exists():
-        logger.info(
-            f"No {ENV_FILE} found. Relying on already-exported environment variables."
-        )
-        return
-
-    try:
-        with open(ENV_FILE, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line or line.startswith("#") or "=" not in line:
-                    continue
-                key, _, value = line.partition("=")
-                key = key.strip()
-                value = value.strip().strip('"').strip("'")
-                if not key:
-                    continue
-                if key in os.environ:
-                    logger.info(
-                        f"{key} already set in the environment - keeping that value over {ENV_FILE}."
-                    )
-                    continue
-                os.environ[key] = value
-    except Exception as e:
-        logger.warning(f"Could not read {ENV_FILE}: {e}")
-
-
-def strip_accents(text: str) -> str:
-    """Removes diacritics so 'Émilie' -> 'Emilie' for username derivation."""
-    normalized = unicodedata.normalize("NFKD", text)
-    return "".join(c for c in normalized if not unicodedata.combining(c))
-
-
 def split_name(
     first_name: Optional[str], last_name: Optional[str], full_name: Optional[str]
 ) -> Optional[Dict[str, str]]:
     """Prefers the actor's own firstName/lastName fields; falls back to
-    splitting the display name. Returns None if nothing usable is found
-    (e.g. the actor returned 'undefined' for a missing field)."""
+    splitting the display name. Returns None if nothing usable is found."""
 
     def clean(part: str) -> str:
         part = strip_accents(part).lower()
@@ -193,8 +113,7 @@ def split_name(
 def generate_username_candidates(
     first_name: Optional[str], last_name: Optional[str], full_name: Optional[str]
 ) -> Dict[str, str]:
-    """Derives a handful of likely username variants from a person's name.
-    Returns a dict of {pattern_name: username}."""
+    """Derives a handful of likely username variants from a person's name."""
     name_parts = split_name(first_name, last_name, full_name)
     if not name_parts:
         return {}
@@ -204,39 +123,30 @@ def generate_username_candidates(
     return {
         "firstlast": f"{first}{last}",
         "first.last": f"{first}.{last}",
-        "flast": f"{first[0]}{last}",
     }
 
 
-def load_target_domains(input_file: Path) -> List[Dict]:
-    """Reads validated domains from Stage 2 output, same pattern used
-    across the pipeline's earlier stages."""
+def load_target_domains(input_file: Path) -> List[Dict[str, Any]]:
+    """Reads validated domains from Stage 2 output."""
     if not input_file.exists():
         logger.error(f"{input_file} not found. Run domain_discovery.py first.")
         return []
 
-    try:
-        with open(input_file, "r", encoding="utf-8") as f:
-            data = json.load(f)
-        return [item for item in data if "domain" in item]
-    except Exception as e:
-        logger.error(f"Failed to read {input_file}: {e}")
-        return []
+    data = load_json(input_file)
+    if isinstance(data, list):
+        return [item for item in data if isinstance(item, dict) and "domain" in item]
+    return []
 
 
 def derive_company_search_query(domain: str) -> str:
-    """Turns 'societegenerale.com' into a rough 'Societe Generale' guess
-    to use as the actor's free-text 'search' input. Crude on purpose -
-    pass --company-name to override when working a single domain."""
+    """Derives a candidate search string from a domain name."""
     label = domain.split(".")[0]
     label = re.sub(r"[-_]+", " ", label)
     return label.title()
 
 
 def resolve_target_label(domain: Optional[str], company_name: Optional[str]) -> str:
-    """Picks whichever of domain/company_name is set, as a plain non-optional
-    string. Raises if neither is given - callers should already guarantee
-    at least one is present."""
+    """Picks whichever of domain/company_name is set as a non-optional string."""
     label = domain or company_name
     if label is None:
         raise ValueError(
@@ -246,43 +156,26 @@ def resolve_target_label(domain: Optional[str], company_name: Optional[str]) -> 
 
 
 def generate_search_query_variants(base_query: str) -> List[str]:
-    """For a multi-word company name, tries both a space-separated and a
-    hyphenated form, since we don't know which way the actor's search
-    matches better (e.g. 'Societe Generale' vs 'Societe-Generale')."""
+    """Generates space-separated and hyphenated search query variants."""
     space_version = re.sub(r"[-_]+", " ", base_query).strip()
     hyphen_version = re.sub(r"\s+", "-", base_query).strip()
 
-    variants = []
+    variants: List[str] = []
     for variant in [space_version, hyphen_version]:
         if variant and variant not in variants:
             variants.append(variant)
     return variants
 
 
-def domain_matches_company(domain: str, item: Dict) -> bool:
-    """Cross-checks a result's employer website/company LinkedIn URL
-    against the target domain, to filter out keyword-search noise."""
-    for current in item.get("currentPosition") or []:
-        company = current.get("company") or {}
-        website = (company.get("website") or "").lower()
-        if domain in website:
-            return True
-    for site in item.get("companyWebsites") or []:
-        if domain in (site.get("domain") or "").lower():
-            return True
-    return False
-
-
 # =====================================================================
-# STAGE A - EMPLOYEE DISCOVERY VIA APIFY (LINKEDIN PROFILE SEARCH)
+# STAGE A - EMPLOYEE DISCOVERY VIA APIFY
 # =====================================================================
 
 
 def run_apify_linkedin_search(
     search_query: str, max_items: int = DEFAULT_MAX_ITEMS_PER_DOMAIN
-) -> List[Dict]:
-    """Calls the harvestapi LinkedIn 'profile search by services' Apify
-    actor for a given free-text query and returns the raw dataset items."""
+) -> List[Dict[str, Any]]:
+    """Calls Apify LinkedIn profile search actor for a given query."""
     logger.info(f"[{search_query}] Running Apify LinkedIn profile search...")
 
     if ApifyClient is None:
@@ -312,9 +205,9 @@ def run_apify_linkedin_search(
         "profileScraperMode": "Full",
         "search": search_query,
         "maxItems": max_items,
-        "locations": [],  # actor requires an array here - null/None is rejected
+        "locations": [],
         "startPage": 1,
-        "takePages": 1,  # actor requires an integer here too - null/None is rejected
+        "takePages": 1,
     }
 
     try:
@@ -335,8 +228,8 @@ def run_apify_linkedin_search(
     return items
 
 
-def parse_experience_entry(exp: Dict) -> Dict:
-    """Normalizes one 'experience' (full job history) entry."""
+def parse_experience_entry(exp: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalizes one experience entry."""
     return {
         "title": exp.get("position"),
         "company_name": exp.get("companyName"),
@@ -351,8 +244,8 @@ def parse_experience_entry(exp: Dict) -> Dict:
     }
 
 
-def parse_education_entry(edu: Dict) -> Dict:
-    """Normalizes one 'education' entry."""
+def parse_education_entry(edu: Dict[str, Any]) -> Dict[str, Any]:
+    """Normalizes one education entry."""
     return {
         "school_name": edu.get("schoolName"),
         "school_linkedin_url": edu.get("schoolLinkedinUrl"),
@@ -364,10 +257,10 @@ def parse_education_entry(edu: Dict) -> Dict:
     }
 
 
-def parse_employee_item(item: Dict, matched_domain: str) -> Optional[Dict]:
-    """Extracts the relevant public fields from one raw actor result:
-    identity, account URL, contact info, full job/education history, and
-    other public profile details."""
+def parse_employee_item(
+    item: Dict[str, Any], matched_domain: str
+) -> Optional[Dict[str, Any]]:
+    """Extracts public fields from raw actor result."""
     name = (
         item.get("name")
         or " ".join(filter(None, [item.get("firstName"), item.get("lastName")])).strip()
@@ -435,12 +328,8 @@ def parse_employee_item(item: Dict, matched_domain: str) -> Optional[Dict]:
     }
 
 
-def normalize_dedup_key(employee: Dict) -> str:
-    """Builds a normalized key so the same person found via different
-    search-query variants (e.g. hyphen vs space) collapses to a single
-    entry before maigret runs, even if the actor returned slightly
-    different URL formatting (trailing slash, query params, casing)
-    between the two calls."""
+def normalize_dedup_key(employee: Dict[str, Any]) -> str:
+    """Builds normalized key for deduplication."""
     public_id = (employee.get("public_identifier") or "").strip().lower()
     if public_id:
         return f"pid:{public_id}"
@@ -458,31 +347,23 @@ def normalize_dedup_key(employee: Dict) -> str:
 
 def discover_employees(
     domain: Optional[str], company_name: Optional[str] = None
-) -> "tuple[List[Dict], List[Dict]]":
-    """Runs Stage A for one target: builds a search query (from an explicit
-    company name, or guessed from the domain), calls the actor, and - only
-    when a domain is available - filters results down to ones plausibly
-    tied to that domain. Company-name-only runs skip that filter since
-    there's no domain to cross-check against.
-
-    Returns (parsed_employees, raw_items_tagged) - the second list keeps
-    every raw actor result untouched (including ones filtered out of
-    employees.json for not matching the domain), tagged with which
-    search target produced them, for later ad-hoc processing.
-    """
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Runs Stage A for one target: queries actor, parses and filters results by company name."""
     label = resolve_target_label(domain, company_name)
 
     if company_name:
         base_query = company_name
     else:
-        assert domain is not None  # guaranteed by resolve_target_label above
+        assert domain is not None
         base_query = derive_company_search_query(domain)
 
     search_queries = generate_search_query_variants(base_query)
 
-    employees = []
-    raw_items_tagged = []
+    employees: List[Dict[str, Any]] = []
+    raw_items_tagged: List[Dict[str, Any]] = []
     total_raw_count = 0
+
+    target_filter = company_name or base_query
 
     for search_query in search_queries:
         raw_items = run_apify_linkedin_search(search_query)
@@ -491,20 +372,14 @@ def discover_employees(
             raw_items_tagged.append(
                 {"search_target": label, "search_query": search_query, "raw": item}
             )
-            if domain and not domain_matches_company(domain, item):
-                continue
+
             parsed = parse_employee_item(item, matched_domain=label)
             if parsed:
                 employees.append(parsed)
 
-    if domain:
-        logger.info(
-            f"[{label}] {len(employees)}/{total_raw_count} result(s) matched the target domain (across {len(search_queries)} query variant(s))."
-        )
-    else:
-        logger.info(
-            f"[{label}] {len(employees)}/{total_raw_count} result(s) kept (no domain to filter against, across {len(search_queries)} query variant(s))."
-        )
+    logger.info(
+        f"[{label}] {len(employees)}/{total_raw_count} result(s) matched the company name filter '{target_filter}' (across {len(search_queries)} query variant(s))."
+    )
     return employees, raw_items_tagged
 
 
@@ -516,25 +391,7 @@ def discover_employees(
 def verify_profile_with_jina(
     url: str, first_name: Optional[str] = None, last_name: Optional[str] = None
 ) -> bool:
-    """Uses Jina AI Reader (a free URL-to-text proxy) to fetch a lightweight
-    text extraction of a maigret 'Claimed' hit and checks two things:
-
-    1. It doesn't look like a 404/"not found" placeholder page.
-    2. If we have the employee's real first/last name, at least one of
-       them actually shows up on the page - this is what catches the
-       'ahichem' (first-initial+last-name) false-positive case, where the
-       username matches a *different* person who happens to share the
-       same last name (e.g. 'Abadou Hichem' claiming a hit meant for
-       'Ammous Hichem'). A last-name-only match on a short pattern isn't
-       enough on its own; requiring the actual page text to contain the
-       real name filters that out.
-
-    Returns True to keep the result, False to discard it. Fails OPEN
-    (keeps the result) on network errors or non-2xx responses from Jina
-    itself - a Jina hiccup isn't proof the profile is dead or mismatched,
-    and a false positive you can eyeball is cheaper than silently losing
-    a real hit.
-    """
+    """Verifies a maigret hit using Jina Reader to eliminate dead pages or false positives."""
     token = os.environ.get("JINA_API_KEY")
     headers = {"Accept": "text/plain"}
     if token:
@@ -558,7 +415,6 @@ def verify_profile_with_jina(
 
     text = response.text.strip()
     if len(text) < 40:
-        # An almost-empty extraction is itself a strong dead-page signal.
         return False
 
     text_lower = text.lower()
@@ -583,40 +439,22 @@ def verify_profile_with_jina(
 
 
 def ensure_tor_proxy_running() -> None:
-    """Starts the 'tor' Compose service once, up front, if
-    MAIGRET_TOR_PROXY_URL is configured - so individual maigret calls
-    (which now pass --no-deps) can assume it's already there instead of
-    each trying to reconcile/recreate it themselves."""
+    """Starts the 'tor' Compose service if MAIGRET_TOR_PROXY_URL is configured."""
     if not os.environ.get(MAIGRET_TOR_PROXY_ENV_VAR):
         return
 
     logger.info("MAIGRET_TOR_PROXY_URL is set - ensuring the 'tor' service is up...")
-    try:
-        result = subprocess.run(
-            ["docker", "compose", "up", "-d", "tor"],
-            capture_output=True,
-            text=True,
-            timeout=60,
-            check=False,
-        )
-        if result.returncode != 0:
-            logger.warning(
-                f"Could not start the 'tor' service (exit code {result.returncode}): "
-                f"{result.stderr.strip()[-500:]}. maigret calls using --tor-proxy will likely fail."
-            )
-        else:
-            logger.info("'tor' service is up.")
-    except Exception as e:
+    success = run_docker_service_up("tor", timeout=60)
+    if not success:
         logger.warning(
-            f"Error starting the 'tor' service: {e}. maigret calls using --tor-proxy will likely fail."
+            "Could not start the 'tor' service. maigret calls using --tor-proxy will likely fail."
         )
+    else:
+        logger.info("'tor' service is up.")
 
 
 def build_maigret_command(username: str, reports_dir: str) -> List[str]:
-    """Builds the 'docker compose run' invocation for one username, scoped
-    to DEFAULT_POPULAR_SITES (or MAIGRET_SITES override) instead of
-    maigret's default top-500, plus optional proxy / Cloudflare-bypass
-    flags read from the environment."""
+    """Builds arguments list for maigret execution via docker compose."""
     site_list_raw = os.environ.get("MAIGRET_SITES")
     sites = (
         [s.strip() for s in site_list_raw.split(",")]
@@ -625,10 +463,6 @@ def build_maigret_command(username: str, reports_dir: str) -> List[str]:
     )
 
     cmd = [
-        "docker",
-        "compose",
-        "run",
-        "--rm",
         "--no-deps",
         "-v",
         f"{reports_dir}:/app/reports",
@@ -661,84 +495,62 @@ def build_maigret_command(username: str, reports_dir: str) -> List[str]:
 
 def run_maigret(
     username: str, first_name: Optional[str] = None, last_name: Optional[str] = None
-) -> List[Dict]:
-    """Runs maigret against a single username candidate (scoped to
-    DEFAULT_POPULAR_SITES), parses the 'Claimed' hits out of its JSON
-    report, and verifies each one through Jina Reader - including an
-    identity cross-check against the employee's real name. Returns a
-    list of {"site": ..., "url": ...} for hits that survived verification.
-
-    Uses a temporary directory bind mount so the JSON report persists
-    after '--rm', matching the theHarvester/SpiderFoot pattern.
-    """
+) -> List[Dict[str, Any]]:
+    """Runs maigret for a username candidate and verifies hits."""
     logger.info(f"  [{username}] Running maigret (popular sites only)...")
-    verified_hits: List[Dict] = []
+    verified_hits: List[Dict[str, Any]] = []
 
     with tempfile.TemporaryDirectory() as tmpdir:
-        cmd = build_maigret_command(username, tmpdir)
+        cmd_args = build_maigret_command(username, tmpdir)
 
-        try:
-            result = subprocess.run(
-                cmd, capture_output=True, text=True, timeout=300, check=False
+        # Execute container using shared runner wrapper
+        run_docker_tool(
+            tool_name="maigret",
+            extra_args=cmd_args,
+            timeout=300,
+            target_identifier=username,
+        )
+
+        report_file = Path(tmpdir) / f"report_{username}_simple.json"
+        if not report_file.exists():
+            logger.warning(
+                f"  [{username}] maigret finished but no report file was found."
             )
+            return verified_hits
 
-            report_file = Path(tmpdir) / f"report_{username}_simple.json"
-            if not report_file.exists():
-                logger.warning(
-                    f"  [{username}] maigret finished (exit code {result.returncode}) but no report file was found."
+        data = load_json(report_file)
+        if not isinstance(data, dict):
+            return verified_hits
+
+        claimed_hits = []
+        for site_name, site_data in data.items():
+            if not isinstance(site_data, dict):
+                continue
+            status_info = site_data.get("status") or {}
+            if status_info.get("status") == "Claimed":
+                claimed_hits.append({"site": site_name, "url": status_info.get("url")})
+
+        logger.info(
+            f"  [{username}] maigret claims {len(claimed_hits)} hit(s) - verifying via Jina Reader..."
+        )
+        for hit in claimed_hits:
+            if not hit["url"]:
+                verified_hits.append(hit)
+                continue
+            if verify_profile_with_jina(
+                hit["url"], first_name=first_name, last_name=last_name
+            ):
+                verified_hits.append(hit)
+            else:
+                logger.info(
+                    f"  [{username}] Discarded likely-mismatched hit on {hit['site']}: {hit['url']}"
                 )
-                if result.stdout.strip():
-                    logger.warning(
-                        f"  [{username}] maigret stdout (tail): {result.stdout.strip()[-800:]}"
-                    )
-                if result.stderr.strip():
-                    logger.warning(
-                        f"  [{username}] maigret stderr (tail): {result.stderr.strip()[-800:]}"
-                    )
-                return verified_hits
-
-            with open(report_file, "r", encoding="utf-8") as f:
-                data = json.load(f)
-
-            claimed_hits = []
-            for site_name, site_data in data.items():
-                if not isinstance(site_data, dict):
-                    continue
-                status_info = site_data.get("status") or {}
-                if status_info.get("status") == "Claimed":
-                    claimed_hits.append(
-                        {"site": site_name, "url": status_info.get("url")}
-                    )
-
-            logger.info(
-                f"  [{username}] maigret claims {len(claimed_hits)} hit(s) - verifying via Jina Reader..."
-            )
-            for hit in claimed_hits:
-                if not hit["url"]:
-                    verified_hits.append(hit)
-                    continue
-                if verify_profile_with_jina(
-                    hit["url"], first_name=first_name, last_name=last_name
-                ):
-                    verified_hits.append(hit)
-                else:
-                    logger.info(
-                        f"  [{username}] Discarded likely-mismatched hit on {hit['site']}: {hit['url']}"
-                    )
-
-        except subprocess.TimeoutExpired:
-            logger.error(
-                f"  [{username}] maigret container timed out (300s). Continuing pipeline."
-            )
-        except Exception as e:
-            logger.error(f"  [{username}] Error executing or parsing maigret: {e}")
 
     return verified_hits
 
 
-def discover_profiles_for_employee(employee: Dict) -> List[Dict]:
-    """Generates username candidates for one employee, runs maigret against
-    each, and returns a tagged list of {username, pattern, platforms}."""
+def discover_profiles_for_employee(employee: Dict[str, Any]) -> List[Dict[str, Any]]:
+    """Generates username candidates and runs maigret enrichment for one employee."""
     candidates = generate_username_candidates(
         employee.get("first_name"), employee.get("last_name"), employee.get("name")
     )
@@ -748,7 +560,7 @@ def discover_profiles_for_employee(employee: Dict) -> List[Dict]:
         )
         return []
 
-    results = []
+    results: List[Dict[str, Any]] = []
     for pattern_name, username in candidates.items():
         hits = run_maigret(
             username,
@@ -769,11 +581,12 @@ def discover_profiles_for_employee(employee: Dict) -> List[Dict]:
 
 
 # =====================================================================
-# MAIN PIPELINE EXECUTION
+# PIPELINE HELPER FUNCTIONS
 # =====================================================================
 
 
-def main():
+def parse_arguments() -> argparse.Namespace:
+    """Parses command line arguments for Stage 3."""
     parser = argparse.ArgumentParser(
         description="OSINT Stage 3: Employee Discovery & Profile Enrichment"
     )
@@ -786,61 +599,46 @@ def main():
         "--domain",
         required=False,
         help="Direct target domain override (e.g. 'example.com'). Used both as the Apify "
-        "search query (unless --company-name is also given) and as the post-search "
-        "domain-match filter.",
+        "search query (unless --company-name is also given).",
     )
     parser.add_argument(
         "--company-name",
         required=False,
-        help="Company name to search for. Can be used on its own (no domain filtering "
-        "applied to results) or together with --domain to override the guessed query "
-        "while still filtering results against that domain.",
+        help="Company name to search for and strictly filter by within LinkedIn user experience.",
     )
-    args = parser.parse_args()
+    return parser.parse_args()
 
+
+def determine_company_slug(args: argparse.Namespace) -> str:
+    """Derives company slug based on CLI flags."""
     if args.company:
-        company_slug = slugify_company(args.company)
-    elif args.company_name:
-        company_slug = slugify_company(args.company_name)
-    elif args.domain:
-        company_slug = slugify_company(args.domain)
-    else:
-        company_slug = "default"
+        return slugify_company(args.company)
+    if args.company_name:
+        return slugify_company(args.company_name)
+    if args.domain:
+        return slugify_company(args.domain)
+    return "default"
 
-    output_dir = Path("output") / company_slug
-    input_file = output_dir / "domains.json"
-    output_file = output_dir / "employees.json"
-    output_raw_file = output_dir / "employees_raw.json"
 
-    if not input_file.exists() and Path("output/domains.json").exists():
-        input_file = Path("output/domains.json")
-
-    load_env_file()
-    ensure_tor_proxy_running()
-
-    # 1. Resolve Target(s): either an explicit --domain and/or --company-name,
-    # or (if neither given) every validated domain from Stage 2's output.
-    targets: List[Dict[str, Optional[str]]] = []
+def resolve_targets(
+    args: argparse.Namespace, input_file: Path
+) -> List[Dict[str, Optional[str]]]:
+    """Resolves target definitions from CLI arguments or Stage 2 output."""
     if args.domain or args.company_name:
-        targets = [{"domain": args.domain, "company_name": args.company_name}]
-    else:
-        domain_entries = load_target_domains(input_file)
-        targets = [
-            {"domain": entry["domain"], "company_name": None}
-            for entry in domain_entries
-        ]
+        return [{"domain": args.domain, "company_name": args.company_name}]
 
-    if not targets:
-        logger.warning("No target domains or company names found to process.")
-        return
-
-    target_labels = [
-        resolve_target_label(t["domain"], t["company_name"]) for t in targets
+    domain_entries = load_target_domains(input_file)
+    return [
+        {"domain": entry["domain"], "company_name": None} for entry in domain_entries
     ]
 
-    # 2. Stage A - Employee discovery per target
-    all_employees: List[Dict] = []
-    all_raw_items: List[Dict] = []
+
+def run_employee_discovery_stage(
+    targets: List[Dict[str, Optional[str]]],
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Executes Stage A employee discovery across targets with deduplication."""
+    all_employees: List[Dict[str, Any]] = []
+    all_raw_items: List[Dict[str, Any]] = []
     seen_identifiers: Set[str] = set()
 
     for target in targets:
@@ -857,15 +655,14 @@ def main():
             seen_identifiers.add(dedup_key)
             all_employees.append(employee)
 
-    employees_found_count = len(all_employees)
+    return all_employees, all_raw_items
 
-    if not all_employees:
-        logger.warning(
-            "No employees discovered via Apify. Nothing to enrich with maigret."
-        )
 
-    # 3. Stage B - Username/profile discovery per employee
-    enriched_employees: List[Dict] = []
+def run_enrichment_stage(
+    all_employees: List[Dict[str, Any]],
+) -> Tuple[List[Dict[str, Any]], int]:
+    """Executes Stage B username enrichment across discovered employees."""
+    enriched_employees: List[Dict[str, Any]] = []
     employees_with_extra_profiles = 0
 
     for employee in all_employees:
@@ -880,26 +677,26 @@ def main():
         enriched_employees.append(employee_record)
 
     enriched_employees.sort(key=lambda x: x["name"].lower())
+    return enriched_employees, employees_with_extra_profiles
 
-    # 4. Write Final JSON Outputs
-    output_dir.mkdir(parents=True, exist_ok=True)
 
-    # output/{company-slug}/employees.json - parsed/deduped, for downstream pipeline stages
-    with open(output_file, "w", encoding="utf-8") as f:
-        json.dump(enriched_employees, f, indent=2, ensure_ascii=False)
-
-    # output/{company-slug}/employees_raw.json - every raw Apify result untouched
-    with open(output_raw_file, "w", encoding="utf-8") as f:
-        json.dump(all_raw_items, f, indent=2, ensure_ascii=False)
-
-    # 5. Console Summary
+def print_summary(
+    target_labels: List[str],
+    employees_found_count: int,
+    employees_with_extra_profiles: int,
+    raw_items_count: int,
+    enriched_employees: List[Dict[str, Any]],
+    output_file: Path,
+    output_raw_file: Path,
+) -> None:
+    """Prints the console execution summary table."""
     print("\n" + "=" * 50)
     print("          EMPLOYEE DISCOVERY SUMMARY")
     print("=" * 50)
     print(f"Target(s)                      : {', '.join(target_labels)}")
     print(f"Employees Found (Apify)         : {employees_found_count}")
     print(f"With Additional Profiles Found  : {employees_with_extra_profiles}")
-    print(f"Raw Apify Results Saved         : {len(all_raw_items)}")
+    print(f"Raw Apify Results Saved         : {raw_items_count}")
     print("-" * 50)
     if enriched_employees:
         print(f"{'NAME':<25} | {'TITLE':<30} | {'EMAIL':<28} | {'EXTRA'}")
@@ -914,6 +711,70 @@ def main():
     print("=" * 50)
     print(f"\nFinal output written to: {output_file.resolve()}")
     print(f"Raw data written to    : {output_raw_file.resolve()}")
+
+
+# =====================================================================
+# MAIN PIPELINE EXECUTION
+# =====================================================================
+
+
+def main() -> None:
+    setup_logging()
+    args = parse_arguments()
+
+    company_slug = determine_company_slug(args)
+
+    output_dir = Path("output") / company_slug
+    input_file = output_dir / "domains.json"
+    output_file = output_dir / "employees.json"
+    output_raw_file = output_dir / "employees_raw.json"
+
+    if not input_file.exists() and Path("output/domains.json").exists():
+        input_file = Path("output/domains.json")
+
+    load_env_file()
+    ensure_tor_proxy_running()
+
+    # 1. Resolve Target(s)
+    targets = resolve_targets(args, input_file)
+    if not targets:
+        logger.warning("No target domains or company names found to process.")
+        return
+
+    target_labels = [
+        resolve_target_label(t["domain"], t["company_name"]) for t in targets
+    ]
+
+    # 2. Stage A - Employee discovery per target
+    all_employees, all_raw_items = run_employee_discovery_stage(targets)
+    employees_found_count = len(all_employees)
+
+    if not all_employees:
+        logger.warning(
+            "No employees discovered via Apify. Nothing to enrich with maigret."
+        )
+
+    # 3. Stage B - Username/profile discovery per employee
+    enriched_employees, employees_with_extra_profiles = run_enrichment_stage(
+        all_employees
+    )
+
+    # 4. Write Final JSON Outputs
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    save_json(output_file, enriched_employees, indent=2, ensure_ascii=False)
+    save_json(output_raw_file, all_raw_items, indent=2, ensure_ascii=False)
+
+    # 5. Console Summary
+    print_summary(
+        target_labels,
+        employees_found_count,
+        employees_with_extra_profiles,
+        len(all_raw_items),
+        enriched_employees,
+        output_file,
+        output_raw_file,
+    )
 
 
 if __name__ == "__main__":

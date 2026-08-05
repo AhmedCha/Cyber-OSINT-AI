@@ -15,6 +15,19 @@ services:
       - "./volumes/spiderfoot:/var/lib/spiderfoot"
     restart: unless-stopped
 
+  # Tor: SOCKS5 proxy gateway (dperson/torproxy - actively maintained,
+  # 50M+ pulls). Used by maigret's --tor-proxy for a free, no-signup way
+  # to route checks and evade per-site rate limits. Takes a little while
+  # to bootstrap on first start - give it a few seconds before running
+  # maigret against it for the first time.
+  tor:
+    image: dperson/torproxy
+    container_name: osint_tor
+    restart: unless-stopped
+    ports:
+      - "9050:9050" # SOCKS5 proxy
+      - "8118:8118" # Privoxy HTTP proxy (optional, not used by maigret)
+
   # =====================================================================
   # ON-DEMAND CLI TOOLS
   # Invoke via: docker compose run --rm <service> <args>
@@ -60,6 +73,8 @@ services:
     image: osint-local/maigret:latest
     container_name: osint_maigret
     entrypoint: ["maigret"]
+    depends_on:
+      - tor
 
   # Metagoofil: Custom Python Slim Build
   metagoofil:

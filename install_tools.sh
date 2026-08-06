@@ -14,13 +14,11 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m' # No Color
 
-# Arrays to store verification summary reports
-declare -a PASSED_TOOLS
-declare -a FAILED_TOOLS
+# Initialize empty arrays explicitly to avoid 'unbound variable' errors under set -u
+PASSED_TOOLS=()
+FAILED_TOOLS=()
 
 log_info() { echo -e "${BLUE}[INFO]${NC} $1"; }
-log_warn() { echo -e "${YELLOW}[WARN]${NC} $1"; }
-log_pass() { echo -e "${GREEN}[PASS]${NC} $1"; }
 log_fail() { echo -e "${RED}[FAIL]${NC} $1"; }
 
 echo -e "${BLUE}=================================================================${NC}"
@@ -36,9 +34,6 @@ if ! docker compose build --pull; then
   exit 1
 fi
 
-# ------------------------------------------------------------------------------
-# 2. Define Smoke Tests (Service Name -> Args to verify execution)
-# ------------------------------------------------------------------------------
 # ------------------------------------------------------------------------------
 # 2. Define Smoke Tests (Service Name -> Args to verify execution)
 # ------------------------------------------------------------------------------
@@ -69,7 +64,7 @@ for service in "${!TOOLS[@]}"; do
   exit_code=$?
 
   shopt -s nocasematch
-  if [[ $exit_code -eq 0 ]] || [[ "$output" =~ (usage|version|spiderfoot|theHarvester|metagoofil|certspotter|check-if-email-exists|reacher|Amass) ]]; then
+  if [[ $exit_code -eq 0 ]] || [[ "$output" =~ (usage|version|spiderfoot|theHarvester|metagoofil|certspotter|Amass) ]]; then
     echo -e "${GREEN}SUCCESS${NC}"
     PASSED_TOOLS+=("$service")
   else
@@ -110,8 +105,8 @@ fi
 echo ""
 echo -e "${YELLOW}Usage Reminder:${NC}"
 echo -e "  • Start persistent web UI:  ${GREEN}docker compose up -d spiderfoot${NC}"
+echo -e "  • Start email validator:    ${GREEN}docker compose up -d reacher${NC}"
 echo -e "  • Run on-demand scan:       ${GREEN}docker compose run --rm amass enum -d example.com${NC}"
-echo -e "  • Check an email:           ${GREEN}docker compose run --rm reacher check test@example.com${NC}"
 echo -e "${BLUE}=================================================================${NC}"
 
 # Exit with failure code if any container failed its smoke test
@@ -140,31 +135,26 @@ fi
 # -----------------------------------------------------------------
 echo "[INFO] Step 2: Ensuring Ollama daemon is active..."
 
-# Check if Ollama is responding on the default port
 if ! curl -s http://localhost:11434/api/tags >/dev/null 2>&1; then
   echo "[WARN] Ollama daemon is not responding. Attempting to start service..."
   if command -v systemctl >/dev/null 2>&1 && systemctl list-unit-files ollama.service >/dev/null 2>&1; then
     sudo systemctl start ollama
   else
-    # Start Ollama in the background if systemd is unavailable
     ollama serve >/dev/null 2>&1 &
   fi
-  # Give the daemon a few seconds to initialize
   sleep 5
 fi
 
 # -----------------------------------------------------------------
-# 3. Pull Llama 3.1 8B (4-bit Quantization: Q4_K_M)
+# 3. Pull Llama 3.1 8B
 # -----------------------------------------------------------------
 MODEL_TAG="llama3.1:8b"
 echo "[INFO] Step 3: Verifying LLM model '${MODEL_TAG}'..."
 
-# Check if the model is already downloaded to avoid re-downloading ~4.9GB
 if ollama list | grep -E -q "^${MODEL_TAG}([[:space:]]|$)"; then
   echo "[INFO] Model '${MODEL_TAG}' is already present. Skipping pull."
 else
-  echo "[INFO] Pulling '${MODEL_TAG}' (default Q4_K_M quantization)..."
-  echo "[INFO] This download is ~4.9GB and may take several minutes depending on your connection."
+  echo "[INFO] Pulling '${MODEL_TAG}'..."
   ollama pull "${MODEL_TAG}"
 fi
 

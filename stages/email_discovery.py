@@ -69,7 +69,7 @@ def run_theharvester_emails(target_domain: str) -> Set[str]:
 
 def run_spiderfoot_emails(target_domain: str) -> Set[str]:
     # Expanded SpiderFoot modules for deeper email enumeration
-    modules = "sfp_email,sfp_hunter,sfp_skymem,sfp_clearbit,sfp_github_code,sfp_spider"
+    modules = "sfp_email,sfp_hunter,sfp_skymem,sfp_clearbit,sfp_github,sfp_spider"
     logger.info(f"[{target_domain}] Running SpiderFoot for emails ({modules})...")
     emails: Set[str] = set()
 

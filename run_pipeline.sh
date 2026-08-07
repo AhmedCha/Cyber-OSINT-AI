@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 
-# Exit immediately if a command exits with a non-zero status.[cite: 23]
-# Treat unset variables as an error.[cite: 23]
-# Fail on the first error in a pipeline.[cite: 23]
+# Exit immediately if a command exits with a non-zero status.
+# Treat unset variables as an error.
+# Fail on the first error in a pipeline.
 set -euo pipefail
 
 # =====================================================================
@@ -19,7 +19,7 @@ NC='\033[0m' # No Color
 # =====================================================================
 cleanup() {
   echo -e "\n${BLUE}[INFO] Pipeline finished or interrupted. Cleaning up persistent background services...${NC}"
-  docker compose stop reacher tor 2>/dev/null || true
+  docker compose stop reacher tor searxng valkey 2>/dev/null || true
 }
 # Catch normal exit, CTRL+C (SIGINT), and script errors (SIGTERM/ERR)
 trap cleanup EXIT INT TERM
@@ -27,7 +27,7 @@ trap cleanup EXIT INT TERM
 # =====================================================================
 # PIPELINE CONFIGURATION
 # =====================================================================
-# Define stages in the format "Stage Name:script_filename"[cite: 23]
+# Define stages in the format "Stage Name:script_filename"
 STAGES=(
   "Name to Domain:name_to_domain.py"
   "Domain Discovery:domain_discovery.py"
@@ -47,7 +47,7 @@ STAGES=(
 # HELPER FUNCTIONS
 # =====================================================================
 
-# Format time in MM:SS for better readability[cite: 23]
+# Format time in MM:SS for better readability
 format_time() {
   local total_seconds=$1
   local mins=$((total_seconds / 60))
@@ -70,7 +70,7 @@ run_stage() {
   local stage_start
   stage_start=$(date +%s)
 
-  # Execute the python script with the company argument[cite: 23]
+  # Execute the python script with the company argument
   MODULE_NAME="${script_name%.py}"
   if ! python3 -m "stages.${MODULE_NAME}" --company "${company}"; then
     echo -e "${RED}Stage failed:${NC}"
@@ -106,15 +106,22 @@ PIPELINE_START=$(date +%s)
 # =====================================================================
 # START PERSISTENT SERVICES GLOBALLY
 # =====================================================================
-echo -e "${BLUE}[INFO] Starting persistent backend services (Reacher, Tor)...${NC}"
-docker compose up -d reacher tor
+echo -e "${BLUE}[INFO] Starting persistent backend services (Reacher, Tor, SearXNG)...${NC}"
+docker compose up -d reacher tor searxng
 
-# Wait briefly for Reacher HTTP server to start listening
+# Wait briefly for Reacher HTTP server to start listening (Fixed port to 8081)
 echo -e "${BLUE}[INFO] Waiting for Reacher API service readiness...${NC}"
-until curl -s http://localhost:8080/v0/check_email -X POST -H "Content-Type: application/json" -d '{"to_email":"test@example.com"}' >/dev/null 2>&1; do
+until curl -s http://localhost:8081/v0/check_email -X POST -H "Content-Type: application/json" -d '{"to_email":"test@example.com"}' >/dev/null 2>&1; do
   sleep 1
 done
 echo -e "${GREEN}[INFO] Reacher service is ready!${NC}\n"
+
+# Wait briefly for SearXNG HTTP server to start listening
+echo -e "${BLUE}[INFO] Waiting for SearXNG service readiness...${NC}"
+until curl -s http://localhost:8080/healthz >/dev/null 2>&1; do
+  sleep 1
+done
+echo -e "${GREEN}[INFO] SearXNG service is ready!${NC}\n"
 
 # =====================================================================
 # RUN PIPELINE STAGES

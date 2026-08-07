@@ -28,6 +28,26 @@ services:
       - "8081:8080"
     restart: unless-stopped
 
+  valkey:
+    image: valkey/valkey:9-alpine
+    container_name: osint_searxng_valkey
+    restart: unless-stopped
+
+  searxng:
+    image: searxng/searxng:latest
+    container_name: osint_searxng
+    ports:
+      - "8080:8080"
+    volumes:
+      # Map the whole directory as writable so the container can operate normally
+      - "./volumes/searxng:/etc/searxng"
+    environment:
+      - SEARXNG_BASE_URL=http://localhost:8080/
+    restart: unless-stopped
+    depends_on:
+      - valkey
+      - tor
+
   # =====================================================================
   # ON-DEMAND CLI TOOLS
   # Invoke via: docker compose run --rm <service> <args>
@@ -71,4 +91,3 @@ services:
       dockerfile: Dockerfile.metagoofil
     image: osint-local/metagoofil:latest
     container_name: osint_metagoofil
-    entrypoint: ["metagoofil"]

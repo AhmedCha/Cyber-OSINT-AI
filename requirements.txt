@@ -1,2 +1,6 @@
 python-dotenv>=1.0.0      # Load environment variables from .env files
-apify-client>=3.1.0 
+apify-client>=3.1.0
+pypdf
+python-docx
+python-pptx
+openpyxl 

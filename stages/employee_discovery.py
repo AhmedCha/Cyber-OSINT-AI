@@ -9,16 +9,13 @@ from typing import Any, Dict, List, Optional, Set, Tuple
 
 import requests
 
-try:
-    from apify_client import ApifyClient
-except ImportError:  # pragma: no cover
-    ApifyClient = None
-
-# Hypothetical shared library imports to prepare for pipeline modularity
+# Shared library imports
 from lib.common import setup_logging, slugify_company, strip_accents
 from lib.config import load_env_file
 from lib.docker_runner import run_docker_service_up, run_docker_tool
 from lib.json_utils import load_json, save_json
+from lib.search import generate_search_query_variants
+from lib.apify_utils import run_apify_actor
 
 # =====================================================================
 # CONFIGURATION & CONSTANTS
@@ -155,18 +152,6 @@ def resolve_target_label(domain: Optional[str], company_name: Optional[str]) -> 
     return label
 
 
-def generate_search_query_variants(base_query: str) -> List[str]:
-    """Generates space-separated and hyphenated search query variants."""
-    space_version = re.sub(r"[-_]+", " ", base_query).strip()
-    hyphen_version = re.sub(r"\s+", "-", base_query).strip()
-
-    variants: List[str] = []
-    for variant in [space_version, hyphen_version]:
-        if variant and variant not in variants:
-            variants.append(variant)
-    return variants
-
-
 # =====================================================================
 # STAGE A - EMPLOYEE DISCOVERY VIA APIFY
 # =====================================================================
@@ -176,30 +161,9 @@ def run_apify_linkedin_search(
     search_query: str, max_items: int = DEFAULT_MAX_ITEMS_PER_DOMAIN
 ) -> List[Dict[str, Any]]:
     """Calls Apify LinkedIn profile search actor for a given query."""
-    logger.info(f"[{search_query}] Running Apify LinkedIn profile search...")
-
-    if ApifyClient is None:
-        logger.error(
-            "apify_client package not installed. Run: pip install apify-client --break-system-packages"
-        )
-        return []
-
-    token = os.environ.get("APIFY_API_TOKEN")
-    if not token:
-        logger.warning(
-            f"[{search_query}] APIFY_API_TOKEN not set. Skipping Apify employee discovery."
-        )
-        return []
-
-    masked = (
-        f"{token[:6]}...{token[-4:]}"
-        if len(token) > 10
-        else "(too short to mask safely)"
-    )
-    logger.info(f"[{search_query}] Using APIFY_API_TOKEN {masked} (len={len(token)}).")
+    logger.info(f"[{search_query}] Preparing Apify LinkedIn profile search...")
 
     actor_id = os.environ.get("APIFY_ACTOR_ID", DEFAULT_APIFY_ACTOR_ID)
-    client = ApifyClient(token)
 
     run_input = {
         "profileScraperMode": "Full",
@@ -210,22 +174,7 @@ def run_apify_linkedin_search(
         "takePages": 1,
     }
 
-    try:
-        run = client.actor(actor_id).call(run_input=run_input)
-        if run is None:
-            logger.error(
-                f"[{search_query}] Apify actor call() returned no run (it may have failed to start)."
-            )
-            return []
-        items = list(client.dataset(run.default_dataset_id).iterate_items())
-    except Exception as e:
-        logger.error(
-            f"[{search_query}] Error calling Apify actor or fetching dataset: {e}"
-        )
-        return []
-
-    logger.info(f"[{search_query}] Apify returned {len(items)} raw profile(s).")
-    return items
+    return run_apify_actor(actor_id, run_input)
 
 
 def parse_experience_entry(exp: Dict[str, Any]) -> Dict[str, Any]:

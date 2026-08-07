@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 import os
 import argparse
+import secrets
 from dotenv import dotenv_values
 
 # ==============================================================================
@@ -9,6 +10,7 @@ from dotenv import dotenv_values
 # Adjust these paths to point to your actual Docker volume mounts
 THEHARVESTER_OUT_PATH = "./volumes/theharvester/api-keys.yaml"
 SPIDERFOOT_OUT_PATH = "./volumes/spiderfoot/SpiderFoot.cfg"
+SEARXNG_OUT_PATH = "./volumes/searxng/settings.yml"
 DOTENV_PATH = ".env"
 
 # ==============================================================================
@@ -57,7 +59,6 @@ THEHARVESTER_MAPPING = {
 }
 
 # Mapping for SpiderFoot: SF_config_key -> env_var_name
-# Excludes the removed Google Search and Bing search keys per instructions.
 SPIDERFOOT_MAPPING = {
     "sfp_abstractapi:companyenrichment_api_key": "ABSTRACTAPI_COMPANYENRICHMENT_KEY",
     "sfp_abstractapi:ipgeolocation_api_key": "ABSTRACTAPI_IPGEOLOCATION_KEY",
@@ -188,6 +189,40 @@ def generate_spiderfoot_cfg(env_vars):
     return "\n".join(lines) + "\n"
 
 
+def generate_searxng_yaml():
+    """Generates the content for SearXNG's settings.yml with Tor proxy addresses."""
+    secret_key = secrets.token_hex(32)
+    return f"""use_default_settings: true
+
+server:
+  secret_key: "{secret_key}"
+  bind_address: "0.0.0.0"
+  port: 8080
+  limiter: false
+
+search:
+  safe_search: 0
+  formats:
+    - html
+    - json
+engines:
+  - name: google
+    engine: google
+    shortcut: go
+    disabled: false
+    timeout: 6.0
+
+  - name: bing
+    engine: bing
+    shortcut: bi
+    disabled: false
+    timeout: 6.0
+
+valkey:
+  url: redis://valkey:6379/0
+"""
+
+
 def main():
     parser = argparse.ArgumentParser(
         description="Generate OSINT tool config files from .env"
@@ -210,6 +245,9 @@ def main():
     # 2. Generate SpiderFoot CFG
     spiderfoot_content = generate_spiderfoot_cfg(env_vars)
 
+    # 3. Generate SearXNG YAML
+    searxng_content = generate_searxng_yaml()
+
     if args.dry_run:
         print("\n" + "=" * 60)
         print(f" [DRY RUN] theHarvester -> {THEHARVESTER_OUT_PATH}")
@@ -220,6 +258,12 @@ def main():
         print(f" [DRY RUN] SpiderFoot -> {SPIDERFOOT_OUT_PATH}")
         print("=" * 60)
         print(spiderfoot_content)
+
+        print("\n" + "=" * 60)
+        print(f" [DRY RUN] SearXNG -> {SEARXNG_OUT_PATH}")
+        print("=" * 60)
+        print(searxng_content)
+
         print("=" * 60 + "\n")
         print("[*] Dry run complete. No files were written.")
 
@@ -227,6 +271,7 @@ def main():
         # Ensure directories exist
         os.makedirs(os.path.dirname(THEHARVESTER_OUT_PATH), exist_ok=True)
         os.makedirs(os.path.dirname(SPIDERFOOT_OUT_PATH), exist_ok=True)
+        os.makedirs(os.path.dirname(SEARXNG_OUT_PATH), exist_ok=True)
 
         # Write files
         with open(THEHARVESTER_OUT_PATH, "w") as f:
@@ -236,6 +281,10 @@ def main():
         with open(SPIDERFOOT_OUT_PATH, "w") as f:
             f.write(spiderfoot_content)
         print(f"[+] Wrote SpiderFoot config to:   {SPIDERFOOT_OUT_PATH}")
+
+        with open(SEARXNG_OUT_PATH, "w") as f:
+            f.write(searxng_content)
+        print(f"[+] Wrote SearXNG config to:      {SEARXNG_OUT_PATH}")
 
 
 if __name__ == "__main__":

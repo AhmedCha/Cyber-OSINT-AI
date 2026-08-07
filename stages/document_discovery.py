@@ -332,10 +332,8 @@ def print_summary(results: List[Dict[str, Any]]) -> None:
 
 def main() -> None:
     setup_logging()
-    logging.getLogger().setLevel(logging.DEBUG)
 
-    # 1. Load environment variables from .env file
-    load_env_file()  # <--- Added call
+    load_env_file()
 
     args = parse_arguments()
 

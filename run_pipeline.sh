@@ -123,6 +123,27 @@ until curl -s http://localhost:8080/healthz >/dev/null 2>&1; do
 done
 echo -e "${GREEN}[INFO] SearXNG service is ready!${NC}\n"
 
+# Wait for the Tor SOCKS proxy to be genuinely usable, not just listening.
+# Tor accepts SOCKS connections before it finishes bootstrapping circuits,
+# so a plain port-open check isn't enough - early requests through it can
+# still time out (this was the exact issue seen in practice: the port was
+# up, but the first darkweb_discovery.py request through it timed out).
+# Verified with a real request through the proxy to a known-stable onion
+# service (the Tor Project's own connectivity-check page, confirmed
+# reachable in prior debugging), rather than a lighter TCP check, since
+# that's the only thing that actually confirms circuits are usable.
+# NOTE: this makes pipeline startup depend on that address staying up long
+# term - same class of risk as any hardcoded onion address (see the earlier
+# sfp_torch mirror issue). --max-time bounds each individual attempt so a
+# slow/stalled attempt doesn't block retries; increase it if Tor bootstrap
+# is consistently slower than 15s on this host.
+echo -e "${BLUE}[INFO] Waiting for Tor SOCKS proxy readiness (can take longer than other services while circuits build)...${NC}"
+until curl -s --socks5-hostname 127.0.0.1:9052 --max-time 15 \
+  http://2gzyxa5ihm7nsggfxnu52rck2vv4rvmdlkiu3zzui5du4xyclen53wid.onion/ >/dev/null 2>&1; do
+  sleep 2
+done
+echo -e "${GREEN}[INFO] Tor SOCKS proxy is ready!${NC}\n"
+
 # =====================================================================
 # RUN PIPELINE STAGES
 # =====================================================================

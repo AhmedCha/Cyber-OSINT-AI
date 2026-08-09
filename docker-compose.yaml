@@ -11,15 +11,18 @@ services:
       - "5001:5001"
     volumes:
       - "./volumes/spiderfoot:/var/lib/spiderfoot"
+    depends_on:
+      - tor
     restart: unless-stopped
 
   tor:
-    image: dperson/torproxy
+    build:
+      context: ./dockerfiles
+      dockerfile: Dockerfile.tor
     container_name: osint_tor
     restart: unless-stopped
     ports:
-      - "9052:9050" 
-      - "8119:8118" 
+      - "9052:9050"
 
   reacher:
     image: reacherhq/backend:latest

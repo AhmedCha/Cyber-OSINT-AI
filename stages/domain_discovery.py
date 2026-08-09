@@ -76,7 +76,7 @@ def run_spiderfoot(target_domain: str) -> Dict[str, Set[str]]:
         "-s",
         target_domain,
         "-m",
-        "sfp_dnsresolve,sfp_whois,sfp_crt",
+        "sfp_dnsresolve,sfp_whois,sfp_crt,sfp_dnsraw,sfp_virustotal,sfp_dnsbrute,sfp_spider,sfp_webserver,sfp_company",
         "-o",
         "json",
         "-q",

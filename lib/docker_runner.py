@@ -71,6 +71,10 @@ def run_docker_tool(
             cmd, capture_output=True, text=True, timeout=timeout, check=True
         )
         logger.debug(f"Tool '{tool_name}' completed successfully{target_log}.")
+        if result.stderr.strip():
+            logger.debug(
+                f"Tool '{tool_name}' stderr{target_log} (exit 0): {result.stderr.strip()}"
+            )
 
         if capture_stdout:
             return result.stdout.strip()

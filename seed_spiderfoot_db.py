@@ -106,6 +106,28 @@ SPIDERFOOT_MAPPING = {
     "sfp_zetalytics:api_key": "ZETALYTICS_KEY",
 }
 
+# NOTE: unlike SPIDERFOOT_MAPPING above (per-module options, scope = module
+# name), the SOCKS/Tor proxy is a GLOBAL SpiderFoot option, stored under a
+# different scope entirely - it has no module name to key off. The scope
+# value and the "_socksN..." option names below are SpiderFoot's commonly
+# documented global-option convention, but were NOT confirmed against a
+# live tbl_config dump before this was written. SAFEST way to confirm:
+# set the SOCKS proxy once via the SpiderFoot web UI (Settings -> General),
+# save it, then run:
+#   sqlite3 ./volumes/spiderfoot/spiderfoot.db \
+#     "SELECT * FROM tbl_config WHERE opt LIKE '%socks%';"
+# and adjust GLOBAL_CONFIG_SCOPE / GLOBAL_OPTIONS below to match exactly
+# what that query returns before relying on this seeding it automatically.
+GLOBAL_CONFIG_SCOPE = "GLOBAL"
+
+GLOBAL_OPTIONS = {
+    "_socks1type": "SPIDERFOOT_SOCKS_TYPE",  # confirmed values: '4','5','HTTP','TOR' - use 'TOR' for .onion targets, not '5'
+    "_socks2addr": "SPIDERFOOT_SOCKS_HOST",  # e.g. "tor" (compose service name)
+    "_socks3port": "SPIDERFOOT_SOCKS_PORT",  # e.g. "9050" (Tor's internal port)
+    "_socks4user": "SPIDERFOOT_SOCKS_USER",  # usually blank for this setup
+    "_socks5pwd": "SPIDERFOOT_SOCKS_PASS",  # usually blank for this setup
+}
+
 
 def check_container_stopped(container_name: str) -> bool:
     """Returns True if the container is stopped or doesn't exist."""
@@ -180,6 +202,13 @@ def main():
 
             scope, opt = sf_key.split(":", 1)
             operations.append((scope, opt, val))
+
+    # Global options (SOCKS/Tor proxy) live under a separate scope - see the
+    # NOTE above GLOBAL_OPTIONS regarding unconfirmed scope/opt names.
+    for opt, env_var in GLOBAL_OPTIONS.items():
+        val = env_vars.get(env_var, "").strip()
+        if val:
+            operations.append((GLOBAL_CONFIG_SCOPE, opt, val))
 
     if not operations:
         print("[*] No API keys found in .env to inject. Exiting.")

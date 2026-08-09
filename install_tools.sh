@@ -35,6 +35,18 @@ if ! docker compose build --pull; then
 fi
 
 # ------------------------------------------------------------------------------
+# 1.5 Generate Tool Configs & Seed SpiderFoot DB
+# ------------------------------------------------------------------------------
+log_info "Step 1.5: Initializing SpiderFoot DB and configuring tools..."
+docker compose up -d spiderfoot
+log_info "Waiting 5 seconds for SpiderFoot to instantiate its database file..."
+sleep 5
+docker compose stop spiderfoot
+
+log_info "Running configure_tools.py to generate configs and inject DB records..."
+python3 configure_tools.py
+
+# ------------------------------------------------------------------------------
 # 2. Define Smoke Tests (Service Name -> Args to verify execution)
 # ------------------------------------------------------------------------------
 declare -A TOOLS=(

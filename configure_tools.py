@@ -3,15 +3,62 @@ import os
 import sys
 import sqlite3
 import argparse
+import secrets
 import subprocess
 from dotenv import dotenv_values
 
 # ==============================================================================
-# CONFIGURATION
+# CONFIGURATION / OUTPUT PATHS
 # ==============================================================================
+THEHARVESTER_OUT_PATH = "./volumes/theharvester/api-keys.yaml"
+SEARXNG_OUT_PATH = "./volumes/searxng/settings.yml"
 DB_PATH = "./volumes/spiderfoot/spiderfoot.db"
 DOTENV_PATH = ".env"
 CONTAINER_NAME = "osint_spiderfoot"
+
+# ==============================================================================
+# HARDCODED SCHEMAS & MAPPINGS
+# ==============================================================================
+
+# Mapping for theHarvester: service_name -> { yaml_key: env_var_name }
+THEHARVESTER_MAPPING = {
+    "bevigil": {"key": "BEVIGIL_KEY"},
+    "bitbucket": {"key": "BITBUCKET_KEY"},
+    "brave": {"key": "BRAVE_KEY"},
+    "bufferoverun": {"key": "BUFFEROVERUN_KEY"},
+    "builtwith": {"key": "BUILTWITH_KEY"},
+    "censys": {"id": "CENSYS_ID", "secret": "CENSYS_SECRET"},
+    "criminalip": {"key": "CRIMINALIP_KEY"},
+    "dehashed": {"key": "DEHASHED_KEY"},
+    "dnsdumpster": {"key": "DNSDUMPSTER_KEY"},
+    "dymo": {"key": "DYMO_KEY"},
+    "fofa": {"key": "FOFA_KEY", "email": "FOFA_EMAIL"},
+    "fullhunt": {"key": "FULLHUNT_KEY"},
+    "github": {"key": "GITHUB_KEY"},
+    "hackertarget": {"key": "HACKERTARGET_KEY"},
+    "haveibeenpwned": {"key": "HIBP_KEY"},
+    "hunter": {"key": "HUNTER_KEY"},
+    "hunterhow": {"key": "HUNTERHOW_KEY"},
+    "intelx": {"key": "INTELX_KEY"},
+    "leakix": {"key": "LEAKIX_KEY"},
+    "leaklookup": {"key": "LEAKLOOKUP_KEY"},
+    "mojeek": {"key": "MOJEEK_KEY"},
+    "netlas": {"key": "NETLAS_KEY"},
+    "onyphe": {"key": "ONYPHE_KEY"},
+    "pentestTools": {"key": "PENTESTTOOLS_KEY"},
+    "projectDiscovery": {"key": "PROJECTDISCOVERY_KEY"},
+    "rocketreach": {"key": "ROCKETREACH_KEY"},
+    "securityscorecard": {"key": "SECURITYSCORECARD_KEY"},
+    "securityTrails": {"key": "SECURITYTRAILS_KEY"},
+    "sherlockeye": {"key": "SHERLOCKEYE_KEY"},
+    "shodan": {"key": "SHODAN_KEY"},
+    "tomba": {"key": "TOMBA_KEY", "secret": "TOMBA_SECRET"},
+    "venacus": {"key": "VENACUS_KEY"},
+    "virustotal": {"key": "VIRUSTOTAL_KEY"},
+    "whoisxml": {"key": "WHOISXML_KEY"},
+    "windvane": {"key": "WINDVANE_KEY"},
+    "zoomeye": {"key": "ZOOMEYE_KEY"},
+}
 
 # Full SpiderFoot mapping (sfp_module:field -> ENV_VAR)
 SPIDERFOOT_MAPPING = {
@@ -129,6 +176,66 @@ GLOBAL_OPTIONS = {
 }
 
 
+def generate_theharvester_yaml(env_vars):
+    """Generates the content for theHarvester's api-keys.yaml."""
+    lines = ["apikeys:"]
+
+    for service, fields in THEHARVESTER_MAPPING.items():
+        lines.append(f"\n  {service}:")
+
+        # Check if ALL required env vars for this service exist and are not empty
+        all_present = all(
+            env_vars.get(env_var, "").strip() != "" for env_var in fields.values()
+        )
+
+        for yaml_key, env_var in fields.items():
+            if all_present:
+                value = env_vars.get(env_var).strip()
+                # Wrap in quotes if it contains spaces or special characters
+                if " " in value or ":" in value:
+                    value = f'"{value}"'
+                lines.append(f"    {yaml_key}: {value}")
+            else:
+                # Leave blank per instructions if missing or incomplete
+                lines.append(f"    {yaml_key}:")
+
+    return "\n".join(lines) + "\n"
+
+
+def generate_searxng_yaml():
+    """Generates the content for SearXNG's settings.yml with Tor proxy addresses."""
+    secret_key = secrets.token_hex(32)
+    return f"""use_default_settings: true
+
+server:
+  secret_key: "{secret_key}"
+  bind_address: "0.0.0.0"
+  port: 8080
+  limiter: false
+
+search:
+  safe_search: 0
+  formats:
+    - html
+    - json
+engines:
+  - name: google
+    engine: google
+    shortcut: go
+    disabled: false
+    timeout: 6.0
+
+  - name: bing
+    engine: bing
+    shortcut: bi
+    disabled: false
+    timeout: 6.0
+
+valkey:
+  url: redis://valkey:6379/0
+"""
+
+
 def check_container_stopped(container_name: str) -> bool:
     """Returns True if the container is stopped or doesn't exist."""
     try:
@@ -153,20 +260,56 @@ def check_container_stopped(container_name: str) -> bool:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Seed SpiderFoot SQLite config from .env"
+        description="Generate OSINT tool config files and seed SpiderFoot DB from .env"
     )
     parser.add_argument(
         "--dry-run",
         action="store_true",
-        help="Print operations without touching the DB",
+        help="Print configs and DB operations without writing to disk or DB",
     )
     parser.add_argument(
         "--force",
         action="store_true",
-        help="Ignore running container warnings (Dangerous!)",
+        help="Ignore running container warnings for SpiderFoot (Dangerous!)",
     )
     args = parser.parse_args()
 
+    # Load environment variables
+    env_vars = dotenv_values(DOTENV_PATH) if os.path.exists(DOTENV_PATH) else {}
+    if not env_vars:
+        print(
+            f"[!] Warning: {DOTENV_PATH} not found or empty. Proceeding with empty values."
+        )
+
+    # 1. Generate theHarvester & SearXNG File Configs
+    harvester_content = generate_theharvester_yaml(env_vars)
+    searxng_content = generate_searxng_yaml()
+
+    if args.dry_run:
+        print("\n" + "=" * 60)
+        print(f" [DRY RUN] theHarvester -> {THEHARVESTER_OUT_PATH}")
+        print("=" * 60)
+        print(harvester_content)
+
+        print("\n" + "=" * 60)
+        print(f" [DRY RUN] SearXNG -> {SEARXNG_OUT_PATH}")
+        print("=" * 60)
+        print(searxng_content)
+    else:
+        # Ensure directories exist
+        os.makedirs(os.path.dirname(THEHARVESTER_OUT_PATH), exist_ok=True)
+        os.makedirs(os.path.dirname(SEARXNG_OUT_PATH), exist_ok=True)
+
+        # Write files
+        with open(THEHARVESTER_OUT_PATH, "w") as f:
+            f.write(harvester_content)
+        print(f"[+] Wrote theHarvester config to: {THEHARVESTER_OUT_PATH}")
+
+        with open(SEARXNG_OUT_PATH, "w") as f:
+            f.write(searxng_content)
+        print(f"[+] Wrote SearXNG config to:      {SEARXNG_OUT_PATH}")
+
+    # 2. Seed SpiderFoot DB
     # Safety Check: SQLite writes can corrupt/fail if the container has a write lock
     if not args.dry_run and not args.force:
         if not check_container_stopped(CONTAINER_NAME):
@@ -178,24 +321,18 @@ def main():
             print("Then try again. (Or bypass this with --force)")
             sys.exit(1)
 
-    if not os.path.exists(DB_PATH):
+    if not os.path.exists(DB_PATH) and not args.dry_run:
         print(f"[ERROR] Database file {DB_PATH} not found.")
         print(
             "You must start the spiderfoot container at least once to generate the database schema."
         )
         sys.exit(1)
 
-    # Load environment variables
-    env_vars = dotenv_values(DOTENV_PATH) if os.path.exists(DOTENV_PATH) else {}
-    if not env_vars:
-        print(f"[!] Warning: {DOTENV_PATH} not found or empty.")
-
     # Prepare data based on the mapping
     operations = []
     for sf_key, env_var in SPIDERFOOT_MAPPING.items():
         val = (env_vars.get(env_var) or "").strip()
         if val:
-            # sf_key format: "sfp_shodan:api_key"
             if ":" not in sf_key:
                 print(f"[!] Skipping malformed key in mapping: {sf_key}")
                 continue
@@ -203,21 +340,20 @@ def main():
             scope, opt = sf_key.split(":", 1)
             operations.append((scope, opt, val))
 
-    # Global options (SOCKS/Tor proxy) live under a separate scope - see the
-    # NOTE above GLOBAL_OPTIONS regarding unconfirmed scope/opt names.
+    # Global options (SOCKS/Tor proxy)
     for opt, env_var in GLOBAL_OPTIONS.items():
         val = (env_vars.get(env_var) or "").strip()
         if val:
             operations.append((GLOBAL_CONFIG_SCOPE, opt, val))
 
     if not operations:
-        print("[*] No API keys found in .env to inject. Exiting.")
+        print("[*] No API keys found in .env to inject into SpiderFoot DB. Exiting.")
         sys.exit(0)
 
     print(f"[*] Found {len(operations)} valid API keys in .env for SpiderFoot.")
 
     if args.dry_run:
-        print("\n=== DRY RUN MODE: No changes will be made ===")
+        print("\n=== DRY RUN MODE: No DB changes will be made ===")
         for scope, opt, val in operations:
             # Mask the secret for display
             masked_val = val[:4] + "*" * (len(val) - 4) if len(val) > 4 else "***"
@@ -225,6 +361,7 @@ def main():
                 f"Would INSERT OR REPLACE -> Scope: {scope:<20} | Opt: {opt:<30} | Val: {masked_val}"
             )
         print("=============================================\n")
+        print("[*] Dry run complete. No files or databases were written.")
         sys.exit(0)
 
     # Execute DB insertions
@@ -234,8 +371,6 @@ def main():
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
 
-        # We use INSERT OR REPLACE. Since (scope, opt) is the PRIMARY KEY,
-        # this will update existing default rows or insert new ones seamlessly.
         insert_query = """
         INSERT OR REPLACE INTO tbl_config (scope, opt, val) 
         VALUES (?, ?, ?);

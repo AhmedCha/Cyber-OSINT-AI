@@ -12,11 +12,11 @@ no longer needed for the engagement (see README/data-handling notes).
 import argparse
 import json
 import logging
-import re
 import time
 from pathlib import Path
 from typing import Any, Dict, List
 
+from lib.apify_utils import run_apify_actor
 from lib.common import setup_logging, slugify_company
 from lib.config import load_env_file, log_api_status_summary
 from lib.docker_runner import run_docker_tool
@@ -24,17 +24,15 @@ from lib.json_utils import load_json, save_json
 
 logger = logging.getLogger(__name__)
 
-# Both providers are native SpiderFoot modules - no separate HTTP client
-# needed, we just run SpiderFoot itself scoped to these two modules and
-# parse whatever it emits. Confirmed present in this project's SpiderFoot
-# module list: sfp_haveibeenpwned, sfp_intelx.
-SPIDERFOOT_MODULES = "sfp_haveibeenpwned,sfp_intelx"
+SPIDERFOOT_MODULES = "sfp_haveibeenpwned,sfp_intelx,sfp_citadel"
 
 # NOTE: exact SpiderFoot event type names for breach data weren't confirmed
 # against a live run at the time of writing - these are SpiderFoot's
 # documented conventions, but verify against your first real run's JSON
 # output and adjust this list if the actual type differs.
 BREACH_EVENT_TYPES = ("EMAILADDR_COMPROMISED", "LEAKSITE_CONTENT")
+
+APIFY_BREACH_ACTOR_ID = "tsOZE5njcLbdFewtU"
 
 REQUEST_DELAY_SECONDS = 1.5  # pacing between requests
 
@@ -111,6 +109,40 @@ def query_spiderfoot_breaches(email: str) -> List[Dict[str, Any]]:
     return breach_events
 
 
+def query_apify_breach_checker(emails: List[str]) -> Dict[str, List[Dict[str, Any]]]:
+    """Runs the Apify breach-checker actor once for ALL emails in a single
+    batched call (its input schema takes a list, unlike SpiderFoot's
+    per-target invocation).
+
+    NOTE: output schema not yet confirmed against a real run - only the
+    input ({"emails": [...]}) was confirmed from the actor's own example
+    script. Each raw item is logged at DEBUG level; check that output on
+    first run and adjust the email-matching key below (currently guessing
+    "email") if the actor uses a different field name.
+    """
+    if not emails:
+        return {}
+
+    logger.info(f"Querying Apify breach-checker actor for {len(emails)} email(s)...")
+    items = run_apify_actor(APIFY_BREACH_ACTOR_ID, {"emails": emails})
+
+    results_by_email: Dict[str, List[Dict[str, Any]]] = {e: [] for e in emails}
+    for item in items:
+        logger.debug(f"Raw Apify breach item: {item}")
+        # Best-guess field names for matching an item back to its email -
+        # verify against the debug output above and adjust if wrong.
+        email_key = item.get("email") or item.get("Email") or item.get("input")
+        if email_key in results_by_email:
+            results_by_email[email_key].append(item)
+        else:
+            logger.warning(
+                f"Apify breach item didn't match a known email "
+                f"(tried 'email'/'Email'/'input' fields) - raw item: {item}"
+            )
+
+    return results_by_email
+
+
 def print_summary(
     checked: int, exposed: int, service_used: str, output_file: Path
 ) -> None:
@@ -154,33 +186,46 @@ def main() -> None:
     ]
     logger.info(
         f"Checking {len(emails)} validated emails via SpiderFoot "
-        f"({SPIDERFOOT_MODULES})..."
+        f"({SPIDERFOOT_MODULES}) and Apify (actor {APIFY_BREACH_ACTOR_ID})..."
     )
     # Reminder, not a blocker: if HIBP_KEY/INTELX_KEY were added to .env
     # after the last seed_spiderfoot_db.py run, re-run that (container
-    # stopped) before this, or both modules will just skip silently.
+    # stopped) before this, or both SpiderFoot modules will just skip
+    # silently.
     log_api_status_summary()
+
+    # Apify actor accepts the full email list in one call - run it once
+    # up front rather than per-email like SpiderFoot below.
+    apify_results = query_apify_breach_checker(emails)
 
     results: List[Dict[str, Any]] = []
     exposed_count = 0
 
     for email in emails:
-        events = query_spiderfoot_breaches(email)
+        sf_events = query_spiderfoot_breaches(email)
+        ap_items = apify_results.get(email, [])
+
+        breaches = [
+            {"type": e.get("type"), "data": e.get("data"), "source": "spiderfoot"}
+            for e in sf_events
+        ] + [
+            {"type": "apify-breach", "data": item, "source": "apify"}
+            for item in ap_items
+        ]
+
         entry = {
             "email": email,
-            "breaches": [
-                {"type": e.get("type"), "data": e.get("data")} for e in events
-            ],
-            "service": "spiderfoot",
+            "breaches": breaches,
+            "services_checked": ["spiderfoot", "apify"],
         }
-        if events:
+        if breaches:
             exposed_count += 1
 
         results.append(entry)
         time.sleep(REQUEST_DELAY_SECONDS)
 
     save_json(output_file, results)
-    print_summary(len(results), exposed_count, "spiderfoot", output_file)
+    print_summary(len(results), exposed_count, "spiderfoot+apify", output_file)
 
 
 if __name__ == "__main__":

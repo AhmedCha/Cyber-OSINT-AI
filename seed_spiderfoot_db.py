@@ -174,7 +174,7 @@ def main():
             print(
                 "Writing to spiderfoot.db while the service is active may cause SQLite lock errors or corruption."
             )
-            print(f"Please run: docker compose stop spiderfoot")
+            print("Please run: docker compose stop spiderfoot")
             print("Then try again. (Or bypass this with --force)")
             sys.exit(1)
 
@@ -193,7 +193,7 @@ def main():
     # Prepare data based on the mapping
     operations = []
     for sf_key, env_var in SPIDERFOOT_MAPPING.items():
-        val = env_vars.get(env_var, "").strip()
+        val = (env_vars.get(env_var) or "").strip()
         if val:
             # sf_key format: "sfp_shodan:api_key"
             if ":" not in sf_key:
@@ -206,7 +206,7 @@ def main():
     # Global options (SOCKS/Tor proxy) live under a separate scope - see the
     # NOTE above GLOBAL_OPTIONS regarding unconfirmed scope/opt names.
     for opt, env_var in GLOBAL_OPTIONS.items():
-        val = env_vars.get(env_var, "").strip()
+        val = (env_vars.get(env_var) or "").strip()
         if val:
             operations.append((GLOBAL_CONFIG_SCOPE, opt, val))
 
@@ -229,6 +229,7 @@ def main():
 
     # Execute DB insertions
     print(f"[*] Opening {DB_PATH} for writes...")
+    conn = None
     try:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
@@ -251,7 +252,7 @@ def main():
         print(f"[FAIL] SQLite database error: {e}")
         sys.exit(1)
     finally:
-        if "conn" in locals():
+        if conn is not None:
             conn.close()
 
 

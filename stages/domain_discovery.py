@@ -21,9 +21,17 @@ logger = logging.getLogger(__name__)
 # =====================================================================
 
 
-def run_theharvester(target_domain: str) -> Dict[str, Set[str]]:
+def run_theharvester(target_domain: str) -> Tuple[Dict[str, Set[str]], Dict[str, Any]]:
+    """Returns (domains_found, raw_data).
+
+    raw_data is theHarvester's full parsed JSON output as-is (hosts, ips,
+    emails, urls, asns, etc. - whatever -b all actually produced) - nothing
+    is filtered out here, so later stages (e.g. llm_filter.py) can mine
+    value from fields this script itself doesn't use, like IP addresses.
+    """
     logger.info(f"[{target_domain}] Running theHarvester (-b all)...")
     domains_found: Set[str] = set()
+    raw_data: Dict[str, Any] = {}
 
     with tempfile.TemporaryDirectory() as tmpdir:
         cmd_args = [
@@ -52,6 +60,7 @@ def run_theharvester(target_domain: str) -> Dict[str, Set[str]]:
         if output_file.exists():
             data = load_json(output_file)
             if data and isinstance(data, dict):
+                raw_data = data  # keep everything, unfiltered
                 for host in data.get("hosts", []):
                     if isinstance(host, str):
                         domains_found.add(host)
@@ -62,10 +71,19 @@ def run_theharvester(target_domain: str) -> Dict[str, Set[str]]:
                 f"[{target_domain}] theHarvester finished but no JSON output file was found."
             )
 
-    return {"theHarvester": domains_found}
+    return {"theHarvester": domains_found}, raw_data
 
 
-def run_spiderfoot(target_domain: str) -> Dict[str, Set[str]]:
+def run_spiderfoot(
+    target_domain: str,
+) -> Tuple[Dict[str, Set[str]], List[Dict[str, Any]]]:
+    """Returns (domains_found, raw_events).
+
+    raw_events is EVERY event SpiderFoot emitted for this target, not just
+    the domain-shaped ones this script filters for below - so IPs, ASNs,
+    WHOIS records, webserver banners, etc. all survive for later LLM
+    extraction rather than being silently discarded here.
+    """
     logger.info(
         f"[{target_domain}] Running SpiderFoot domain enrichment modules (sfp_dnsresolve,sfp_whois,sfp_crt)..."
     )
@@ -85,14 +103,15 @@ def run_spiderfoot(target_domain: str) -> Dict[str, Set[str]]:
     stdout_data = run_docker_tool(
         tool_name="spiderfoot",
         extra_args=cmd_args,
-        timeout=300,
+        timeout=3600,
         target_identifier=target_domain,
         capture_stdout=True,
     )
 
     domains_found: Set[str] = set()
+    raw_events: List[Dict[str, Any]] = []
     if not stdout_data:
-        return {}
+        return {}, raw_events
 
     # Handle both List[str] and str return types from run_docker_tool safely
     if isinstance(stdout_data, list):
@@ -104,7 +123,11 @@ def run_spiderfoot(target_domain: str) -> Dict[str, Set[str]]:
 
     try:
         events = json.loads(raw_json_str)
+        if isinstance(events, list):
+            raw_events = events  # keep every event, unfiltered
         for event in events:
+            if not isinstance(event, dict):
+                continue
             event_type = event.get("type", "")
             data = event.get("data", "")
             if event_type in [
@@ -121,8 +144,11 @@ def run_spiderfoot(target_domain: str) -> Dict[str, Set[str]]:
                 line.lower(),
             )
             domains_found.update(matches)
+        # Unparseable as JSON - keep the raw lines so nothing's lost, even
+        # though they can't be structured into individual events here.
+        raw_events = [{"unparsed_line": line} for line in lines if line.strip()]
 
-    return {"SpiderFoot": domains_found}
+    return {"SpiderFoot": domains_found}, raw_events
 
 
 # =====================================================================
@@ -180,17 +206,33 @@ def load_target_domains(
 
 def collect_candidates(
     target_domains: List[str],
-) -> Tuple[Dict[str, List[str]], int]:
+) -> Tuple[Dict[str, List[str]], int, Dict[str, Dict[str, Any]]]:
+    """Returns (domain_origins, raw_candidates_count, raw_by_target).
+
+    raw_by_target holds the FULL unfiltered output per target domain, per
+    tool - {"example.com": {"theHarvester": {...}, "SpiderFoot": [...]}}
+    - saved separately for later LLM extraction (IPs, ASNs, WHOIS, etc.
+    that this stage itself doesn't use for domain discovery).
+    """
     domain_origins: Dict[str, List[str]] = {}
     raw_candidates_count = 0
+    raw_by_target: Dict[str, Dict[str, Any]] = {}
 
     for target in target_domains:
         logger.info(f"--- Processing Candidate Domain: {target} ---")
         domain_origins.setdefault(target, []).append("Stage1-Root")
 
+        th_domains, th_raw = run_theharvester(target)
+        sf_domains, sf_raw = run_spiderfoot(target)
+
+        raw_by_target[target] = {
+            "theHarvester": th_raw,
+            "SpiderFoot": sf_raw,
+        }
+
         tool_results: Dict[str, Set[str]] = {}
-        tool_results.update(run_theharvester(target))
-        tool_results.update(run_spiderfoot(target))
+        tool_results.update(th_domains)
+        tool_results.update(sf_domains)
 
         for tool_name, domains in tool_results.items():
             for raw_domain in domains:
@@ -203,7 +245,7 @@ def collect_candidates(
                     if tool_name not in domain_origins[norm_domain]:
                         domain_origins[norm_domain].append(tool_name)
 
-    return domain_origins, raw_candidates_count
+    return domain_origins, raw_candidates_count, raw_by_target
 
 
 def validate_candidates(domain_origins: Dict[str, List[str]]) -> List[Dict[str, Any]]:
@@ -228,6 +270,7 @@ def print_summary(
     unique_count: int,
     validated_domains: List[Dict[str, Any]],
     output_file: Path,
+    raw_output_file: Path,
 ) -> None:
     print("\n" + "=" * 50)
     print("           DOMAIN DISCOVERY SUMMARY")
@@ -245,7 +288,8 @@ def print_summary(
     else:
         print("No resolving domains were discovered.")
     print("=" * 50)
-    print(f"\nFinal output written to: {output_file.resolve()}")
+    print(f"\nFiltered domain list written to: {output_file.resolve()}")
+    print(f"Full raw tool output written to: {raw_output_file.resolve()}")
 
 
 # =====================================================================
@@ -261,6 +305,7 @@ def main() -> None:
     output_dir = Path("output") / company_slug
     input_file = output_dir / "candidate_domains.json"
     output_file = output_dir / "domains.json"
+    raw_output_file = output_dir / "domain_discovery_raw.json"
 
     if not input_file.exists() and Path("output/candidate_domains.json").exists():
         input_file = Path("output/candidate_domains.json")
@@ -273,7 +318,9 @@ def main() -> None:
 
     log_api_status_summary()
 
-    domain_origins, raw_candidates_count = collect_candidates(target_domains)
+    domain_origins, raw_candidates_count, raw_by_target = collect_candidates(
+        target_domains
+    )
     unique_candidates_count = len(domain_origins)
     logger.info(
         f"Collected {raw_candidates_count} raw candidates ({unique_candidates_count} unique normalized domains)."
@@ -283,6 +330,7 @@ def main() -> None:
 
     output_dir.mkdir(parents=True, exist_ok=True)
     save_json(output_file, validated_domains, indent=2)
+    save_json(raw_output_file, raw_by_target, indent=2)
 
     print_summary(
         target_domains,
@@ -290,6 +338,7 @@ def main() -> None:
         unique_candidates_count,
         validated_domains,
         output_file,
+        raw_output_file,
     )
 
 

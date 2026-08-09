@@ -578,7 +578,8 @@ def resolve_targets(
 
     domain_entries = load_target_domains(input_file)
     return [
-        {"domain": entry["domain"], "company_name": None} for entry in domain_entries
+        {"domain": entry["domain"], "company_name": args.company}
+        for entry in domain_entries
     ]
 
 

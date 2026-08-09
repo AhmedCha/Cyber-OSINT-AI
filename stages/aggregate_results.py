@@ -96,9 +96,9 @@ def aggregate_domains(company_dir: Path) -> List[Dict[str, Any]]:
         entry = merged.setdefault(
             domain, {"domain": domain, "sources": [], "dns_validated": False}
         )
-        for src in item.get("services_checked", []):
-            if src not in entry["services"]:
-                entry["services"].append(src)
+        for src in item.get("sources", []):
+            if src not in entry["sources"]:
+                entry["sources"].append(src)
 
     for item in validated:
         domain = item.get("domain")
@@ -343,19 +343,61 @@ def aggregate_breaches(company_dir: Path) -> List[Dict[str, Any]]:
         for b in item.get("breaches", []):
             if b not in entry["breaches"]:
                 entry["breaches"].append(b)
-        service = item.get("service")
-        if service and service not in entry["services"]:
-            entry["services"].append(service)
+        # breach_lookup.py emits "services_checked" (a list, e.g.
+        # ["spiderfoot", "apify"]) - fall back to a legacy singular
+        # "service" key in case an older run/tool version produced that
+        # shape instead, so neither format silently loses data.
+        services = item.get("services_checked")
+        if not isinstance(services, list):
+            single = item.get("service")
+            services = [single] if single else []
+        for service in services:
+            if service and service not in entry["services"]:
+                entry["services"].append(service)
     return sorted(merged.values(), key=lambda x: x["email"])
 
 
 # =====================================================================
-# BREACHES
+# DARK WEB
 # =====================================================================
 
 
 def aggregate_darkweb(company_dir: Path) -> List[Dict[str, Any]]:
-    return load_list(company_dir / "darkweb.json")
+    """Merge darkweb_discovery.py's per-target scan results, deduplicated on
+    (target, target_type), unioning modules_checked and mentions in case the
+    same target was scanned more than once."""
+    records = load_list(company_dir / "darkweb.json")
+    merged: Dict[tuple, Dict[str, Any]] = {}
+
+    for item in records:
+        target = item.get("target")
+        target_type = item.get("target_type")
+        if not target or not target_type:
+            continue
+        key = (target, target_type)
+        entry = merged.setdefault(
+            key,
+            {
+                "target": target,
+                "target_type": target_type,
+                "mentions": [],
+                "modules_checked": [],
+            },
+        )
+        mentions = item.get("mentions")
+        if isinstance(mentions, list):
+            for m in mentions:
+                if m not in entry["mentions"]:
+                    entry["mentions"].append(m)
+        modules = item.get("modules_checked")
+        if isinstance(modules, list):
+            for mod in modules:
+                if mod not in entry["modules_checked"]:
+                    entry["modules_checked"].append(mod)
+
+    result = list(merged.values())
+    result.sort(key=lambda x: (x["target_type"], x["target"]))
+    return result
 
 
 # =====================================================================
@@ -397,6 +439,15 @@ def build_slim_context(aggregate: Dict[str, Any]) -> Dict[str, Any]:
             for e in aggregate["employees"]
         ],
         "breach_count": len(aggregate["breaches"]),
+        "darkweb_targets_with_mentions": [
+            {
+                "target": d["target"],
+                "target_type": d["target_type"],
+                "mention_count": len(d["mentions"]),
+            }
+            for d in aggregate["darkweb"]
+            if d["mentions"]
+        ],
         "counts": aggregate["counts"],
     }
 
@@ -449,6 +500,7 @@ def main() -> None:
     breaches = aggregate_breaches(company_dir)
     darkweb = aggregate_darkweb(company_dir)
     dns_infra = load_dict(company_dir / "dns_infra.json")
+    infrastructure_raw = load_dict(company_dir / "domain_discovery_raw.json")
 
     counts = {
         "Domains": len(domains),
@@ -461,6 +513,9 @@ def main() -> None:
         "  - content verified": sum(1 for d in documents if d["content_verified"]),
         "Employees": len(employees),
         "Breach records": len(breaches),
+        "Dark web targets scanned": len(darkweb),
+        "  - with mentions found": sum(1 for d in darkweb if d["mentions"]),
+        "Infrastructure raw targets": len(infrastructure_raw),
     }
 
     aggregate: Dict[str, Any] = {
@@ -473,6 +528,7 @@ def main() -> None:
         "employees": employees,
         "breaches": breaches,
         "darkweb": darkweb,
+        "infrastructure_raw": infrastructure_raw,
         "counts": counts,
     }
 

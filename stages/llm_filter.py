@@ -697,22 +697,66 @@ EMAIL_VERDICT_ITEM_SCHEMA = {
 }
 
 EMAIL_INSTRUCTIONS = (
-    "You are reviewing candidate email addresses for a target company. Some are "
-    "confirmed-deliverable (validation_status=deliverable), most are untested "
-    "pattern-generated guesses (validation_status=unknown). Assign a tier: "
-    "'confirmed' (validation_status=deliverable), 'likely' (unknown status but a "
-    "plausible single, common naming pattern e.g. first.last@ or f.last@), "
-    "'speculative' (unknown status, a less common pattern), or 'noise' (generic "
-    "role addresses with no named employee, or duplicate patterns already covered "
-    "by a better one for the same person). Set keep=false ONLY for tier='noise' "
-    "entries that add no value - when in doubt, keep=true."
+    "You are reviewing candidate email addresses for a target company. Assign a tier "
+    "based PRIMARILY on validation_status and confidence, not on how plausible the "
+    "naming pattern looks:\n"
+    "- 'confirmed': validation_status='deliverable' (SMTP validation actually succeeded).\n"
+    "- 'likely': validation_status='unknown' but confidence is GREATER THAN 0 (some "
+    "partial validation signal exists, e.g. a catch-all domain).\n"
+    "- 'speculative': confidence is 0 (SMTP validation was never run, was inconclusive, "
+    "or failed) - use this even for a common, plausible-looking naming pattern like "
+    "first.last@ or f.last@. A confidence of 0 means the address is UNVALIDATED, not "
+    "that the pattern is unlikely, but you must not call it 'likely' - that would "
+    "overstate certainty that validation never actually confirmed.\n"
+    "- 'noise': generic role addresses with no named employee, or a duplicate pattern "
+    "already covered by a better candidate for the same person.\n"
+    "NEVER assign 'confirmed' or 'likely' when confidence is 0, regardless of how "
+    "standard the naming pattern looks. Set keep=false ONLY for tier='noise' entries "
+    "that add no value - when in doubt, keep=true."
 )
+
+
+def enforce_email_tier_rules(
+    records: List[Dict[str, Any]], warnings: List[str]
+) -> None:
+    """Code-level backstop for the confidence-vs-tier rule, applied AFTER the
+    model's verdicts are merged in. Prompt instructions alone aren't
+    reliable enough to guarantee this - an 8B model (or a future swapped-in
+    model) can still call an unvalidated, confidence=0 address 'likely'
+    because the naming pattern looks plausible. This corrects that
+    deterministically, in-place, on both kept and excluded records, and
+    logs every correction for transparency."""
+    for r in records:
+        verdict = r.get("_llm_verdict")
+        if not isinstance(verdict, dict):
+            continue
+        tier = verdict.get("tier")
+        if tier not in ("confirmed", "likely"):
+            continue
+
+        confidence = r.get("confidence")
+        validation_status = r.get("validation_status")
+
+        if tier == "confirmed" and validation_status != "deliverable":
+            verdict["tier"] = "speculative" if (confidence or 0) == 0 else "likely"
+            warnings.append(
+                f"[emails] Downgraded '{r.get('email')}' from tier=confirmed to "
+                f"tier={verdict['tier']}: validation_status is '{validation_status}', not 'deliverable'."
+            )
+        elif tier == "likely" and (confidence or 0) == 0:
+            verdict["tier"] = "speculative"
+            warnings.append(
+                f"[emails] Downgraded '{r.get('email')}' from tier=likely to tier=speculative: "
+                f"confidence is 0 (unvalidated / SMTP inconclusive), regardless of naming pattern."
+            )
 
 
 def compact_employee(e: Dict[str, Any]) -> Dict[str, Any]:
     identifier = e.get("public_identifier") or e.get("name")
     current = e.get("current_position") or {}
-    positions = e.get("all_positions") or []
+    if not isinstance(current, dict):
+        current = {"value": current}
+    positions = _as_list(e.get("all_positions"))
     trimmed_positions = [
         {
             "title": p.get("title"),
@@ -721,8 +765,9 @@ def compact_employee(e: Dict[str, Any]) -> Dict[str, Any]:
             "end_date": p.get("end_date"),
         }
         for p in positions[:6]
+        if isinstance(p, dict)
     ]
-    about = (e.get("about") or "")[:400]
+    about = str(e.get("about") or "")[:400]
     return {
         "identifier": identifier,
         "name": e.get("name"),
@@ -731,7 +776,7 @@ def compact_employee(e: Dict[str, Any]) -> Dict[str, Any]:
         "current_position": current,
         "recent_positions": trimmed_positions,
         "about_excerpt": about,
-        "services_offered": (e.get("services_offered") or [])[:6],
+        "services_offered": _as_list(e.get("services_offered"))[:6],
     }
 
 
@@ -760,21 +805,116 @@ EMPLOYEE_INSTRUCTIONS = (
 )
 
 
+def _as_list(x: Any) -> List[Any]:
+    """Defensively normalize a value that's supposed to be a list but, given
+    breach_lookup.py isn't written yet and different lookup services return
+    different shapes, might arrive as a dict, a scalar, or missing entirely."""
+    if isinstance(x, list):
+        return x
+    if x is None:
+        return []
+    return [x]
+
+
+def _is_structured_breach_report(data: Any) -> bool:
+    """Detects the Apify/XposedOrNot-style breach report shape (has
+    breachNames/status/riskLabel etc.) vs a SpiderFoot raw-event dump or
+    some other unknown shape."""
+    return isinstance(data, dict) and (
+        "breachNames" in data or "status" in data or "riskScore" in data
+    )
+
+
+def _extract_structured_breach_summary(
+    data: Dict[str, Any], source: Optional[str]
+) -> Dict[str, Any]:
+    """Pulls the genuinely high-value fields out of a large Apify/XposedOrNot
+    breach report, dropping the verbose nested 'analytics' tree (industry
+    stat breakdowns, yearwise histograms, treemap data, etc.) that adds
+    nothing for an OSINT report but would otherwise dominate the LLM's
+    context budget on slow hardware."""
+    breach_details = _as_list(data.get("breachDetails"))
+    trimmed_details = []
+    for bd in breach_details[:10]:
+        if not isinstance(bd, dict):
+            continue
+        trimmed_details.append(
+            {
+                "breach": bd.get("breach"),
+                "industry": bd.get("industry"),
+                "xposed_date": bd.get("xposed_date"),
+                "xposed_records": bd.get("xposed_records"),
+                "xposed_data": bd.get("xposed_data"),
+                "password_risk": bd.get("password_risk"),
+                "verified": bd.get("verified"),
+            }
+        )
+    return {
+        "source": source,
+        "kind": "structured_breach_report",
+        "status": data.get("status"),
+        "breach_count": data.get("breachCount"),
+        "breach_names": data.get("breachNames"),
+        "risk_label": data.get("riskLabel"),
+        "risk_score": data.get("riskScore"),
+        "paste_count": data.get("pasteCount"),
+        "breach_details": trimmed_details,
+    }
+
+
 def compact_breach(b: Dict[str, Any]) -> Dict[str, Any]:
     entries = []
-    for group in (b.get("breaches") or [])[:3]:
-        for item in (group.get("data") or [])[:5]:
+    for group in _as_list(b.get("breaches"))[:5]:
+        if not isinstance(group, dict):
+            # Unexpected shape (e.g. a bare string/number breach entry) -
+            # surface it as-is rather than crashing or silently dropping it.
+            entries.append({"source": None, "kind": "unknown", "value": group})
+            continue
+
+        source = group.get("source") or group.get("type")
+        data = group.get("data")
+
+        if isinstance(data, dict) and _is_structured_breach_report(data):
+            # Real breach report (e.g. Apify/XposedOrNot) - extract the
+            # high-value summary fields, drop the noisy analytics tree.
+            entries.append(_extract_structured_breach_summary(data, source))
+            continue
+
+        data_items = _as_list(data)[:5]
+        if not data_items:
             entries.append(
-                {
-                    "type": item.get("type"),
-                    "module": item.get("module"),
-                    "data": item.get("data"),
-                }
+                {"source": source, "kind": "empty", "raw_type": group.get("type")}
             )
+            continue
+
+        for item in data_items:
+            if isinstance(item, dict):
+                # SpiderFoot-style {type, module, data} raw event, or some
+                # other dict shape we don't specifically recognize.
+                entries.append(
+                    {
+                        "source": source,
+                        "kind": "raw_event",
+                        "type": item.get("type", group.get("type")),
+                        "module": item.get("module"),
+                        "data": item["data"] if "data" in item else item,
+                    }
+                )
+            else:
+                entries.append(
+                    {
+                        "source": source,
+                        "kind": "raw_event",
+                        "type": group.get("type"),
+                        "module": None,
+                        "data": item,
+                    }
+                )
+
     return {
         "email": b.get("email"),
         "services": b.get("services", []),
-        "sample_findings": entries,
+        "findings": entries,
     }
 
 
@@ -790,15 +930,90 @@ BREACH_VERDICT_ITEM_SCHEMA = {
 }
 
 BREACH_INSTRUCTIONS = (
-    "You are reviewing breach/exposure lookup results for target-company emails. Some "
-    "'findings' are genuine breach/leak exposures; many are just SpiderFoot noting that "
-    "an email address exists (e.g. type='Email Address' with module='SpiderFoot UI' and "
-    "data equal to the email itself, with no actual breach name/date/site attached) - "
-    "these are NOT real exposures and should be marked keep=false with note explaining "
-    "why. If sample_findings contains a real named breach/leak source, keep=true and "
-    "summarize what was exposed in 'exposure_summary' using ONLY the data given."
+    "You are reviewing breach/exposure lookup results for target-company emails. Each "
+    "email's 'findings' list can contain two very different kinds of entries:\n"
+    "1. kind='structured_breach_report' - a real breach-database lookup result (e.g. "
+    "from XposedOrNot/Apify) with fields like status, breach_count, breach_names, "
+    "risk_label, risk_score, and breach_details (each with breach name, xposed_date, "
+    "xposed_records, xposed_data, password_risk). If status is 'breached' or "
+    "breach_names is non-empty, this IS a genuine exposure - keep=true, and write "
+    "'exposure_summary' as a concise sentence naming the breaches, how many records/what "
+    "kind of data was exposed, and the risk_label - using ONLY the fields given.\n"
+    "2. kind='raw_event' with source='spiderfoot' (or similar) - usually just SpiderFoot "
+    "confirming an email address exists (type='Email Address', module='SpiderFoot UI', "
+    "data equal to the email itself), with no actual breach name/date attached. This is "
+    "NOT a real exposure - keep=false with a note explaining it's just an existence check, "
+    "UNLESS its 'data' field clearly names a real breach/leak source, in which case treat "
+    "it like a genuine finding.\n"
+    "If an email has both a genuine structured_breach_report AND spiderfoot noise, keep=true "
+    "and summarize only the genuine findings - do not mention the noise in exposure_summary."
 )
 
+
+def compact_darkweb(d: Dict[str, Any]) -> Dict[str, Any]:
+    mentions = _as_list(d.get("mentions"))
+    return {
+        "target_key": f"{d.get('target')}||{d.get('target_type')}",
+        "target": d.get("target"),
+        "target_type": d.get("target_type"),
+        "modules_checked": d.get("modules_checked", []),
+        "mentions": mentions[:10],
+    }
+
+
+DARKWEB_VERDICT_ITEM_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "target_key": {"type": "string"},
+        "keep": {"type": "boolean"},
+        "exposure_summary": {"type": "string"},
+        "note": {"type": "string"},
+    },
+    "required": ["target_key", "keep"],
+}
+
+DARKWEB_INSTRUCTIONS = (
+    "You are reviewing dark web scan results for the target company (its domain, its "
+    "name, and named individuals linked to it). Each record has a 'mentions' list of "
+    "actual hits found on onion search engines / dark web indexes. Some mentions may be "
+    "irrelevant false positives (e.g. an unrelated page that happens to contain a common "
+    "word from the target's name). Set keep=true if the mentions genuinely appear to "
+    "reference the target company or person, and write 'exposure_summary' describing "
+    "what was found using ONLY the data given. Set keep=false ONLY if the mentions are "
+    "clearly unrelated false positives - when unsure, keep=true."
+)
+
+
+def compact_infrastructure(i: Dict[str, Any]) -> Dict[str, Any]:
+    return {
+        "target_domain": i.get("target_domain"),
+        "theHarvester": i.get("theHarvester", {}),
+        "SpiderFoot": i.get("SpiderFoot", []),
+    }
+
+
+INFRASTRUCTURE_VERDICT_ITEM_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "target_domain": {"type": "string"},
+        "keep": {"type": "boolean"},
+        "ips": {"type": "array", "items": {"type": "string"}},
+        "asns": {"type": "array", "items": {"type": "string"}},
+        "whois_data": {"type": "array", "items": {"type": "string"}},
+        "banners_and_tech": {"type": "array", "items": {"type": "string"}},
+        "note": {"type": "string"},
+    },
+    "required": ["target_domain", "keep"],
+}
+
+INFRASTRUCTURE_INSTRUCTIONS = (
+    "You are reviewing raw infrastructure discovery data (from theHarvester and SpiderFoot) "
+    "for a target domain. Extract genuinely useful structured findings like real IP addresses, "
+    "ASN/network ownership info, notable WHOIS fields, and interesting webserver or tech-stack "
+    "banners. Explicitly ignore purely internal bookkeeping events, duplicate/redundant entries, "
+    "and empty fields. Set keep=true if you found actionable infrastructure data. Set keep=false "
+    "ONLY if the data is entirely noise, empty, or uninformative."
+)
 
 # =====================================================================
 # ASSEMBLY & OUTPUT
@@ -820,6 +1035,8 @@ def build_output_template(
         "emails": {"kept": [], "excluded": []},
         "employees": {"kept": [], "excluded": []},
         "breaches": {"kept": [], "excluded": []},
+        "darkweb": {"kept": [], "excluded": []},
+        "infrastructure_insights": {"kept": [], "excluded": []},
         "documents": [],
         "dns_infra": {},
         "warnings": [],
@@ -888,6 +1105,28 @@ def main() -> None:
     )
     output["domains"] = {"kept": kept, "excluded": excluded}
 
+    # --- Infrastructure Insights ---------------------------------------
+    logger.info("Filtering infrastructure raw data...")
+    infra_raw_dict = aggregate.get("infrastructure_raw", {})
+    infra_records = []
+
+    for domain, data in infra_raw_dict.items():
+        rec = dict(data)
+        rec["target_domain"] = domain
+        infra_records.append(rec)
+
+    infra_kept, infra_excluded = run_filter_pass(
+        "infrastructure",
+        infra_records,
+        "target_domain",
+        compact_infrastructure,
+        INFRASTRUCTURE_VERDICT_ITEM_SCHEMA,
+        BASE_SYSTEM_PROMPT,
+        INFRASTRUCTURE_INSTRUCTIONS,
+        **common_kwargs,
+    )
+    output["infrastructure_insights"] = {"kept": infra_kept, "excluded": infra_excluded}
+
     # --- Emails --------------------------------------------------------
     logger.info("Filtering emails...")
     kept, excluded = run_filter_pass(
@@ -901,6 +1140,8 @@ def main() -> None:
         **common_kwargs,
     )
     output["emails"] = {"kept": kept, "excluded": excluded}
+    enforce_email_tier_rules(kept, warnings)
+    enforce_email_tier_rules(excluded, warnings)
 
     # --- Employees -------------------------------------------------
     logger.info("Filtering employees...")
@@ -945,6 +1186,35 @@ def main() -> None:
     )
     output["breaches"] = {"kept": kept, "excluded": excluded}
 
+    # --- Dark web ----------------------------------------------------
+    logger.info("Filtering dark web scan results...")
+    darkweb_records = []
+    for d in aggregate.get("darkweb", []):
+        d2 = dict(d)
+        d2["target_key"] = f"{d.get('target')}||{d.get('target_type')}"
+        darkweb_records.append(d2)
+
+    with_mentions = [d for d in darkweb_records if d.get("mentions")]
+    without_mentions = [d for d in darkweb_records if not d.get("mentions")]
+
+    dw_kept, dw_excluded = run_filter_pass(
+        "darkweb",
+        with_mentions,
+        "target_key",
+        compact_darkweb,
+        DARKWEB_VERDICT_ITEM_SCHEMA,
+        BASE_SYSTEM_PROMPT,
+        DARKWEB_INSTRUCTIONS,
+        **common_kwargs,
+    )
+    # Targets with zero mentions need no LLM judgment - there's nothing to
+    # filter, so they're kept automatically without spending a call on them.
+    for d in without_mentions:
+        annotated = dict(d)
+        annotated["_llm_verdict"] = {"keep": True, "note": "no_dark_web_mentions_found"}
+        dw_kept.append(annotated)
+    output["darkweb"] = {"kept": dw_kept, "excluded": dw_excluded}
+
     # --- Documents (one LLM call per document) ----------------------
     documents = aggregate.get("documents", [])
     logger.info(f"Summarizing {len(documents)} document(s)...")
@@ -982,6 +1252,11 @@ def main() -> None:
         "employees_excluded": len(output["employees"]["excluded"]),
         "breaches_kept": len(output["breaches"]["kept"]),
         "breaches_excluded": len(output["breaches"]["excluded"]),
+        "darkweb_kept": len(output["darkweb"]["kept"]),
+        "darkweb_excluded": len(output["darkweb"]["excluded"]),
+        "darkweb_with_mentions": len(with_mentions),
+        "infrastructure_kept": len(output["infrastructure_insights"]["kept"]),
+        "infrastructure_excluded": len(output["infrastructure_insights"]["excluded"]),
         "documents_summarized": sum(1 for d in doc_summaries if d["summary"]),
         "documents_errored": sum(1 for d in doc_summaries if d["error"]),
         "warning_count": len(warnings),

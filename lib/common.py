@@ -50,3 +50,30 @@ def slugify_company(name: Optional[str]) -> str:
     clean_slug = text.strip("-")
 
     return clean_slug if clean_slug else "default"
+
+
+def generate_company_abbreviation(company_name: str) -> str:
+    """
+    Generates a company abbreviation by stripping stop words and taking initials.
+    """
+    if not company_name:
+        return ""
+
+    stop_words = {"de", "du", "des", "la", "le", "les", "et", "the", "and", "of", "for"}
+
+    # Handle accented characters via the existing strip_accents() helper
+    clean_name = strip_accents(company_name)
+
+    # Splits on whitespace/hyphens
+    words = re.split(r"[\s\-]+", clean_name)
+
+    initials = []
+    for word in words:
+        if not word:
+            continue
+        if word.lower() not in stop_words:
+            # Takes the first letter of each remaining word, uppercases
+            initials.append(word[0].upper())
+
+    # Joins with no separator
+    return "".join(initials)

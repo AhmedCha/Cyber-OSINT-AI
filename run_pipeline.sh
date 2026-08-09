@@ -87,19 +87,64 @@ run_stage() {
   echo -e "${GREEN}Stage completed in ${formatted_elapsed} (${elapsed}s).${NC}\n"
 }
 
+pause_step() {
+  if [[ "${PAUSE_FLAG}" == true ]]; then
+    echo -e "${YELLOW}[PAUSED] Stage complete. Press 'c' to continue to the next stage...${NC}"
+    while true; do
+      read -r -s -n 1 key
+      if [[ "$key" == "c" || "$key" == "C" ]]; then
+        echo -e "${GREEN}Continuing pipeline...${NC}\n"
+        break
+      else
+        echo -e "\n${YELLOW}[PAUSED] Invalid key. Press 'c' to continue...${NC}"
+      fi
+    done
+  fi
+}
+
 # =====================================================================
 # MAIN EXECUTION
 # =====================================================================
 
-if [[ $# -eq 0 ]]; then
-  echo -e "${YELLOW}Usage: $0 \"Company Name\"${NC}"
+PAUSE_FLAG=false
+COMPANY=""
+
+# Parse arguments to support the --pause flag
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+  --pause)
+    PAUSE_FLAG=true
+    shift
+    ;;
+  -*)
+    echo -e "${RED}Unknown option: $1${NC}"
+    echo -e "${YELLOW}Usage: $0 [--pause] \"Company Name\"${NC}"
+    exit 1
+    ;;
+  *)
+    if [[ -z "$COMPANY" ]]; then
+      COMPANY="$1"
+    else
+      echo -e "${RED}Too many arguments. Only one company name is allowed.${NC}"
+      echo -e "${YELLOW}Usage: $0 [--pause] \"Company Name\"${NC}"
+      exit 1
+    fi
+    shift
+    ;;
+  esac
+done
+
+if [[ -z "$COMPANY" ]]; then
+  echo -e "${YELLOW}Usage: $0 [--pause] \"Company Name\"${NC}"
   exit 1
 fi
 
-COMPANY="$1"
 TOTAL_STAGES=${#STAGES[@]}
 
 echo -e "${GREEN}Starting OSINT Pipeline for company: ${COMPANY}${NC}\n"
+if [[ "${PAUSE_FLAG}" == true ]]; then
+  echo -e "${YELLOW}Manual inspection mode enabled. The pipeline will pause after each stage.${NC}\n"
+fi
 
 PIPELINE_START=$(date +%s)
 
@@ -109,7 +154,7 @@ PIPELINE_START=$(date +%s)
 echo -e "${BLUE}[INFO] Starting persistent backend services (Reacher, Tor, SearXNG)...${NC}"
 docker compose up -d reacher tor searxng
 
-# Wait briefly for Reacher HTTP server to start listening (Fixed port to 8081)
+# Wait briefly for Reacher HTTP server to start listening
 echo -e "${BLUE}[INFO] Waiting for Reacher API service readiness...${NC}"
 until curl -s http://localhost:8081/v0/check_email -X POST -H "Content-Type: application/json" -d '{"to_email":"test@example.com"}' >/dev/null 2>&1; do
   sleep 1
@@ -123,20 +168,7 @@ until curl -s http://localhost:8080/healthz >/dev/null 2>&1; do
 done
 echo -e "${GREEN}[INFO] SearXNG service is ready!${NC}\n"
 
-# Wait for the Tor SOCKS proxy to be genuinely usable, not just listening.
-# Tor accepts SOCKS connections before it finishes bootstrapping circuits,
-# so a plain port-open check isn't enough - early requests through it can
-# still time out (this was the exact issue seen in practice: the port was
-# up, but the first darkweb_discovery.py request through it timed out).
-# Verified with a real request through the proxy to a known-stable onion
-# service (the Tor Project's own connectivity-check page, confirmed
-# reachable in prior debugging), rather than a lighter TCP check, since
-# that's the only thing that actually confirms circuits are usable.
-# NOTE: this makes pipeline startup depend on that address staying up long
-# term - same class of risk as any hardcoded onion address (see the earlier
-# sfp_torch mirror issue). --max-time bounds each individual attempt so a
-# slow/stalled attempt doesn't block retries; increase it if Tor bootstrap
-# is consistently slower than 15s on this host.
+# Wait for the Tor SOCKS proxy to be genuinely usable
 echo -e "${BLUE}[INFO] Waiting for Tor SOCKS proxy readiness (can take longer than other services while circuits build)...${NC}"
 until curl -s --socks5-hostname 127.0.0.1:9052 --max-time 15 \
   http://2gzyxa5ihm7nsggfxnu52rck2vv4rvmdlkiu3zzui5du4xyclen53wid.onion/ >/dev/null 2>&1; do
@@ -154,6 +186,9 @@ for i in "${!STAGES[@]}"; do
   STAGE_NUM=$((i + 1))
 
   run_stage "$STAGE_NUM" "$TOTAL_STAGES" "$STAGE_NAME" "$SCRIPT_NAME" "$COMPANY"
+
+  # Trigger the manual inspection pause function
+  pause_step
 done
 
 PIPELINE_END=$(date +%s)

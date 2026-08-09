@@ -16,6 +16,7 @@ def run_apify_actor(actor_id: str, run_input: Dict[str, Any]) -> List[Dict[str, 
         logger.warning("APIFY_API_TOKEN not set in environment.")
         return []
 
+    conn = None
     logger.info(f"Running Apify actor '{actor_id}' via HTTP POST...")
 
     try:
@@ -56,6 +57,7 @@ def run_apify_actor(actor_id: str, run_input: Dict[str, Any]) -> List[Dict[str, 
         return []
     finally:
         try:
-            conn.close()
+            if conn is not None:
+                conn.close()
         except NameError:
             pass

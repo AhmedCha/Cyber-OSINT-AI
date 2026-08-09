@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+import os
+import requests
 import argparse
 import logging
 import tempfile
@@ -31,15 +33,37 @@ def extract_subdomains(output_lines: List[str], root_domain: str) -> Set[str]:
 
 def run_certspotter(domain: str) -> Set[str]:
     logger.info(
-        f"[{domain}] Running CertSpotter for Certificate Transparency subdomains..."
+        f"[{domain}] Querying CertSpotter API for Certificate Transparency subdomains..."
     )
+    headers = {}
+    key = os.getenv("CERTSPOTTER_KEY", "").strip()
+    if key:
+        headers["Authorization"] = f"Bearer {key}"
 
-    # Reverting to the straightforward arguments from your original working version
-    cmd_args = ["-domain", domain]
+    try:
+        resp = requests.get(
+            "https://api.certspotter.com/v1/issuances",
+            params={
+                "domain": domain,
+                "include_subdomains": "true",
+                "expand": "dns_names",
+            },
+            headers=headers,
+            timeout=30,
+        )
+        resp.raise_for_status()
+        issuances = resp.json()
+    except Exception as e:
+        logger.error(f"[{domain}] CertSpotter API request failed: {e}")
+        return set()
 
-    # Keeping your updated timeout
-    lines = run_docker_tool("certspotter", cmd_args, timeout=900)
-    return extract_subdomains(lines or [], domain)
+    found = set()
+    for cert in issuances:
+        for name in cert.get("dns_names", []):
+            clean = normalize_subdomain(name, domain)
+            if clean:
+                found.add(clean)
+    return found
 
 
 def run_amass(domain: str) -> Set[str]:
@@ -47,6 +71,8 @@ def run_amass(domain: str) -> Set[str]:
     lines = run_docker_tool(
         "amass", ["amass", "enum", "-passive", "-d", domain], timeout=600
     )
+    if isinstance(lines, str):
+        lines = lines.splitlines()
     return extract_subdomains(lines or [], domain)
 
 

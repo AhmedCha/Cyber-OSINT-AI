@@ -5,7 +5,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Set
 
 # Hypothetical shared library imports to prepare for pipeline modularity
-from lib.common import setup_logging, slugify_company
+from lib.common import setup_logging, slugify_company, generate_company_abbreviation
 from lib.json_utils import save_json
 from lib.network import (
     domain_matches_company,
@@ -16,7 +16,7 @@ from lib.network import (
 from lib.search import query_searxng
 
 # Constants
-SEARXNG_URL = "http://localhost:8080/search"
+SEARXNG_URL = "http://localhost:8080"
 
 # Common non-company platforms to exclude from search results
 DENYLIST_DOMAINS = (
@@ -44,12 +44,11 @@ logger = logging.getLogger(__name__)
 # =====================================================================
 
 
-def search_searxng(company_name: str) -> Set[str]:
+def search_searxng(company_name: str, abbreviation: str = "") -> Set[str]:
     """Queries a local SearXNG instance for the company's official website/domain."""
     logger.info(f"Querying local SearXNG ({SEARXNG_URL}) for '{company_name}'...")
     domains: Set[str] = set()
 
-    # query_searxng handles URL encoding, HTTP requests, timeout handling, and JSON parsing
     search_results = query_searxng(
         base_url=SEARXNG_URL,
         query=f"{company_name} official site",
@@ -66,16 +65,15 @@ def search_searxng(company_name: str) -> Set[str]:
 
         norm = normalize_domain(url_str)
 
-        # Filter 1: Valid syntax and not in denylist
         if not is_valid_domain_syntax(norm) or norm.endswith(DENYLIST_DOMAINS):
             continue
 
-        # Filter 2: Lexical matching against company name
-        if domain_matches_company(norm, company_name):
+        # Pass abbreviation down to domain_matches_company
+        if domain_matches_company(norm, company_name, abbreviation):
             domains.add(norm)
         else:
             logger.debug(
-                f"Discarding '{norm}' - does not lexically match '{company_name}'"
+                f"Discarding '{norm}' - does not lexically match '{company_name}' or '{abbreviation}'"
             )
 
     return domains
@@ -95,6 +93,12 @@ def parse_arguments() -> argparse.Namespace:
         "--company",
         required=True,
         help="Target company name (e.g. 'Example Corp' or 'Example-Corp')",
+    )
+    # Added optional abbreviation CLI argument
+    parser.add_argument(
+        "--abbreviation",
+        required=False,
+        help="Optional explicitly-supplied abbreviation (e.g. 'BTS'). Overrides auto-generation.",
     )
     return parser.parse_args()
 
@@ -153,17 +157,24 @@ def main() -> None:
     company_name = args.company
     company_slug = slugify_company(company_name)
 
+    # Auto-derive abbreviation if not explicitly supplied
+    abbreviation = (
+        args.abbreviation
+        if args.abbreviation
+        else generate_company_abbreviation(company_name)
+    )
+
     output_dir = Path("output") / company_slug
     output_file = output_dir / "candidate_domains.json"
 
     logger.info(
-        f"Starting name-to-domain candidate discovery for company: {company_name}"
+        f"Starting name-to-domain candidate discovery for company: {company_name} (Abbrev: {abbreviation})"
     )
 
     domain_origins: Dict[str, List[str]] = {}
 
-    # 1. Query sources
-    searxng_domains = search_searxng(company_name)
+    # 1. Query sources (passing the abbreviation)
+    searxng_domains = search_searxng(company_name, abbreviation)
     for d in searxng_domains:
         domain_origins.setdefault(d, []).append("SearXNG")
 

@@ -50,8 +50,10 @@ def normalize_subdomain(line: Optional[str], root_domain: str) -> Optional[str]:
     return None
 
 
-def domain_matches_company(domain: str, company_name: str) -> bool:
-    """Lexically verifies if a domain candidate matches the target company name."""
+def domain_matches_company(
+    domain: str, company_name: str, abbreviation: str = ""
+) -> bool:
+    """Lexically verifies if a domain candidate matches the target company name or abbreviation."""
     if not domain or not company_name:
         return False
 
@@ -62,7 +64,16 @@ def domain_matches_company(domain: str, company_name: str) -> bool:
     if not clean_company or not clean_domain_root:
         return False
 
-    return clean_domain_root in clean_company or clean_company in clean_domain_root
+    # Check 1 & 2: concatenated full name logic
+    is_match = (clean_domain_root in clean_company) or (
+        clean_company in clean_domain_root
+    )
+
+    # Check 3: Generated abbreviation (lowercased) appears in the domain string
+    if abbreviation and (abbreviation.lower() in domain.lower()):
+        is_match = True
+
+    return is_match
 
 
 def resolves_dns(domain: str) -> bool:

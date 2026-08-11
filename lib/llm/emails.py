@@ -2,10 +2,10 @@
 Emails category for the LLM filter pass. Used with lib/llm/filter_pass.py's
 run_filter_pass(identifier_field="email").
 
-Two deterministic, code-level backstops live here alongside the LLM pass
-(both applied AFTER the model's verdicts are merged in, since prompt
-instructions alone aren't reliable enough to guarantee either rule for an
-8B model or a future swapped-in one):
+Three deterministic, code-level backstops live here alongside the LLM pass
+(all applied AFTER the model's verdicts are merged in, since prompt
+instructions alone aren't reliable enough to guarantee any of these rules
+for an 8B model or a future swapped-in one):
 
   - enforce_email_tier_rules: confidence/validation_status must dominate
     tier, never how plausible the naming pattern looks.
@@ -14,6 +14,15 @@ instructions alone aren't reliable enough to guarantee either rule for an
     catchall_unverifiable flag and a forced 'speculative' tier, since SMTP
     validation is fundamentally inconclusive for them, not merely
     unconfirmed.
+  - reconcile_unverifiable_pattern_guesses: the two backstops above only
+    ever relabel verdict['tier'] in place - they never touch
+    verdict['keep'], so on their own they cannot move a record between the
+    kept/excluded lists llm_filter.py's main() already split. This step is
+    what actually enforces the underlying rule: an email that is
+    tier=speculative/noise, confidence=0, AND has no real (non-pattern-
+    generated) discovery source gets moved from kept to excluded, with
+    keep=False and a clear note. Must run AFTER the other two so it sees
+    their corrected tiers, not the model's raw ones.
 
 _is_infrastructure_hostname_email() is the llm_filter-stage safety net for
 the root-cause fix in lib/email_patterns.py (candidates shouldn't be
@@ -21,11 +30,16 @@ generated against an MX/infra hostname at all) - it excludes any that
 reached this stage anyway, structurally, without spending an LLM call.
 """
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from lib.email_patterns import is_infrastructure_hostname
 
 EMAIL_TIERS = {"confirmed", "likely", "speculative", "noise"}
+
+# Case-insensitive source markers that indicate an email candidate exists
+# ONLY because it was pattern-guessed (firstname.lastname@domain), never
+# independently discovered by a real recon tool (theHarvester, SpiderFoot).
+_PATTERN_GENERATED_SOURCE_MARKERS = {"pattern-generation", "manual-generation"}
 
 EMAIL_VERDICT_ITEM_SCHEMA = {
     "type": "object",
@@ -130,6 +144,75 @@ def enforce_catchall_tagging(
                 f"tier=speculative: domain is confirmed catch-all, so SMTP "
                 f"validation is fundamentally inconclusive for every candidate at it."
             )
+
+
+def _is_pattern_generated_only(sources: Any) -> bool:
+    """True only if `sources` is non-empty and EVERY entry is a
+    pattern-guess marker - never true for an empty/missing sources list,
+    since that's not evidence of anything, and never true if even one
+    real discovery source (theHarvester, SpiderFoot, ...) is present."""
+    if not isinstance(sources, list) or not sources:
+        return False
+    return all(
+        isinstance(s, str) and s.strip().lower() in _PATTERN_GENERATED_SOURCE_MARKERS
+        for s in sources
+    )
+
+
+def reconcile_unverifiable_pattern_guesses(
+    kept: List[Dict[str, Any]],
+    excluded: List[Dict[str, Any]],
+    warnings: List[str],
+) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
+    """Final reconciliation pass - call this AFTER enforce_email_tier_rules
+    and enforce_catchall_tagging have both already run on `kept`/`excluded`,
+    so it sees their corrected tiers rather than the model's raw ones.
+
+    Those two functions only ever relabel verdict['tier'] in place; by
+    design neither touches verdict['keep'], so a tier correction alone can
+    never move a record between the kept/excluded lists llm_filter.py's
+    main() already split on the model's original keep/exclude call. This
+    function is what actually enforces the underlying rule: an email that
+    is tier in ('speculative', 'noise'), confidence==0, AND has no real
+    (non-pattern-generated) discovery source should end up excluded, not
+    merely tier-relabeled while still presented as a kept finding. A
+    record with at least one real discovery source stays kept even at
+    tier=speculative/confidence=0, per spec.
+
+    Returns new (kept, excluded) lists - does not mutate the input lists
+    in place, since entries move between them."""
+    still_kept: List[Dict[str, Any]] = []
+    reconciled: List[Dict[str, Any]] = []
+
+    for r in kept:
+        verdict = r.get("_llm_verdict")
+        if not isinstance(verdict, dict):
+            still_kept.append(r)
+            continue
+
+        tier = verdict.get("tier")
+        confidence = r.get("confidence") or 0
+        if (
+            tier in ("speculative", "noise")
+            and confidence == 0
+            and _is_pattern_generated_only(r.get("sources"))
+        ):
+            verdict["keep"] = False
+            addition = (
+                f"Reconciled from kept to excluded: tier={tier}, confidence=0, and "
+                f"every source is pattern-generated ({r.get('sources')}) - no "
+                f"independent discovery confirms this address exists."
+            )
+            existing_note = verdict.get("note")
+            verdict["note"] = (
+                f"{existing_note} {addition}" if existing_note else addition
+            )
+            warnings.append(f"[emails] {addition} ({r.get('email')})")
+            reconciled.append(r)
+        else:
+            still_kept.append(r)
+
+    return still_kept, excluded + reconciled
 
 
 def _email_domain(email: Optional[str]) -> str:

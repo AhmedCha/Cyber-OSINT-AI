@@ -31,10 +31,11 @@ Usage:
 import argparse
 import logging
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
-from lib.common import setup_logging, slugify_company
+from lib.common import setup_logging, slugify_company, strip_accents
 from lib.json_utils import load_json, save_json
+from lib.email_patterns import is_infrastructure_hostname
 
 logger = logging.getLogger(__name__)
 
@@ -186,6 +187,39 @@ def aggregate_emails(company_dir: Path) -> List[Dict[str, Any]]:
     return result
 
 
+def summarize_email_domains(emails: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """One entry per email domain seen among the aggregated candidates,
+    noting whether email_validation.py's per-domain catch-all pre-check
+    flagged it (validation_status=='smtp_inconclusive_catchall' /
+    is_catch_all=True on its candidates) - a single fact instead of only
+    being inferable by scanning every individual email's status. Also
+    flags domains that are themselves infrastructure hostnames (e.g.
+    mail.bts.com.tn), since those shouldn't have had candidates generated
+    against them in the first place (see email_patterns.py)."""
+    summary: Dict[str, Dict[str, Any]] = {}
+    for e in emails:
+        email = e.get("email") or ""
+        if "@" not in email:
+            continue
+        domain = email.split("@", 1)[1]
+        entry = summary.setdefault(
+            domain,
+            {
+                "domain": domain,
+                "candidate_count": 0,
+                "confirmed_catch_all": False,
+                "is_infrastructure_hostname": is_infrastructure_hostname(domain),
+            },
+        )
+        entry["candidate_count"] += 1
+        if e.get("validation_status") == "smtp_inconclusive_catchall" or e.get(
+            "is_catch_all"
+        ):
+            entry["confirmed_catch_all"] = True
+
+    return [summary[d] for d in sorted(summary)]
+
+
 # =====================================================================
 # DOCUMENTS (resolve on-disk paths for apify / metagoofil downloads)
 # =====================================================================
@@ -249,25 +283,255 @@ def aggregate_documents(company_dir: Path) -> List[Dict[str, Any]]:
 # EMPLOYEES
 # =====================================================================
 
+# Subdomain labels that don't identify the company itself (e.g. the
+# search-matched domain "mail.bts.com.tn" should key off "bts", not "mail").
+_COMMON_SUBDOMAIN_PREFIXES = {
+    "www",
+    "mail",
+    "webmail",
+    "smtp",
+    "mx",
+    "ftp",
+    "m",
+    "portal",
+    "intranet",
+    "vpn",
+}
+
+# Reliability tiers, in the priority order the report should render them.
+EMPLOYEE_TIER_ORDER = [
+    "leadership",
+    "current_employee",
+    "intern",
+    "former_employee",
+    "reject",
+]
+
+LEADERSHIP_KEYWORDS = [
+    "director",
+    "directeur",
+    "directrice",
+    "manager",
+    "responsable",
+    "head of",
+    "chef de",
+    "chief",
+    "ceo",
+    "cto",
+    "cfo",
+    "coo",
+    "cio",
+    "founder",
+    "co-founder",
+    "fondateur",
+    "fondatrice",
+    "president",
+    "président",
+    "présidente",
+    "vice president",
+    "vice-président",
+    "vice-présidente",
+    "chairman",
+    "chairwoman",
+    "partner",
+    "associé gérant",
+    "general manager",
+    "managing director",
+    "gérant",
+    "gérante",
+    "principal",
+    "senior manager",
+    "team lead",
+]
+
+INTERN_KEYWORDS = ["intern", "stagiaire", "trainee", "internship", "stage"]
+
+
+def _normalize_for_match(text: Optional[str]) -> str:
+    return strip_accents(text or "").lower()
+
+
+# Title-keyword matching runs against accent-stripped text (see
+# _normalize_for_match), so the keyword lists themselves must be
+# accent-stripped too, or accented entries like "président" would never
+# match the normalized "president" they're being compared against.
+_LEADERSHIP_KEYWORDS_NORMALIZED = [_normalize_for_match(k) for k in LEADERSHIP_KEYWORDS]
+_INTERN_KEYWORDS_NORMALIZED = [_normalize_for_match(k) for k in INTERN_KEYWORDS]
+
+
+def _domain_keyword(domain: Optional[str]) -> str:
+    """Extracts the company-identifying label from a domain, skipping
+    common subdomain prefixes (e.g. 'mail.bts.com.tn' -> 'bts', not
+    'mail', which the old plain `domain.split('.')[0]` approach got wrong)."""
+    if not domain:
+        return ""
+    parts = domain.lower().split(".")
+    while len(parts) > 2 and parts[0] in _COMMON_SUBDOMAIN_PREFIXES:
+        parts = parts[1:]
+    return parts[0] if parts else ""
+
+
+def _acronym(text: str) -> str:
+    """Derives an initials-style acronym from a multi-word name, e.g.
+    'Banque Tunisienne de Solidarite' -> 'btds'. Only meaningful for
+    matching against short, acronym-like domain keywords/company names."""
+    words = [w for w in _normalize_for_match(text).split() if w]
+    return "".join(w[0] for w in words)
+
+
+def _position_matches_target(
+    position_company_name: Optional[str],
+    domain_keyword: str,
+    company_name: Optional[str],
+) -> bool:
+    """True if a position's company name plausibly refers to the target
+    company. The search domain's label (e.g. 'bts' from bts.com.tn) is the
+    primary, reliable signal. The human-readable --company name is used
+    only as a narrow acronym check (e.g. company_name 'BTS' matching a
+    position literally containing 'BTS') - a plain word-overlap match was
+    tried and rejected because generic words shared by many companies in
+    the same sector/country (e.g. 'Banque', 'Tunisienne', 'Solidarite')
+    produced false positives on unrelated employers."""
+    if not position_company_name:
+        return False
+
+    normalized = (
+        _normalize_for_match(position_company_name).replace("-", " ").replace("_", " ")
+    )
+    normalized_compact = normalized.replace(" ", "")
+
+    if domain_keyword and domain_keyword in normalized_compact:
+        return True
+
+    if company_name:
+        target_normalized = _normalize_for_match(company_name).strip()
+        # Short, acronym-like target names (e.g. "BTS") matched as a whole
+        # word in the position's company name.
+        if len(target_normalized) <= 6 and target_normalized:
+            if target_normalized in set(normalized.split()):
+                return True
+        # A multi-word target name's own initials appearing as a whole
+        # word in the position's company name (e.g. target "Banque
+        # Tunisienne de Solidarite" -> "bts" found in "BTS BANK").
+        acronym = _acronym(company_name)
+        if len(acronym) >= 2 and acronym in set(normalized.split()):
+            return True
+
+    return False
+
+
+def _is_ongoing(position: Dict[str, Any]) -> bool:
+    """A position with no end_date (LinkedIn's convention for a role
+    that's still active) counts as ongoing."""
+    end_date = position.get("end_date")
+    return not end_date or str(end_date).strip().lower() in ("", "present")
+
+
+def classify_employee_tier(
+    employee: Dict[str, Any], matched_domain: str, company_name: Optional[str]
+) -> Tuple[str, str]:
+    """Assigns a reliability tier to a discovered person based on their
+    position history at the target company, plus a short human-readable
+    reason:
+      - leadership       - current role at target company, senior/leadership title
+      - current_employee - current role at target company, standard title
+      - intern           - current role at target company, intern/trainee title
+      - former_employee  - past (non-ongoing) role at target company only
+      - reject           - no position in the data ever placed them at the
+                            target company at all
+    Requires enriched position data (current_position / all_positions); if
+    neither is present (e.g. raw, pre-enrichment records) this can't be
+    assessed and the caller should not call this function.
+    """
+    domain_keyword = _domain_keyword(matched_domain)
+
+    current_list = employee.get("current_position") or []
+    if isinstance(current_list, dict):
+        current_list = [current_list]
+    if not isinstance(current_list, list):
+        current_list = []
+    all_positions = employee.get("all_positions") or []
+    if not isinstance(all_positions, list):
+        all_positions = []
+
+    matched_current: List[Dict[str, Any]] = []
+    matched_former: List[Dict[str, Any]] = []
+
+    # LinkedIn's own "current position" bucket is definitionally ongoing.
+    for pos in current_list:
+        if isinstance(pos, dict) and _position_matches_target(
+            pos.get("company_name"), domain_keyword, company_name
+        ):
+            matched_current.append(pos)
+
+    # Full position history may surface target-company roles (current or
+    # past) that didn't make it into the current-position bucket.
+    for pos in all_positions:
+        if not isinstance(pos, dict):
+            continue
+        if not _position_matches_target(
+            pos.get("company_name"), domain_keyword, company_name
+        ):
+            continue
+        if _is_ongoing(pos):
+            matched_current.append(pos)
+        else:
+            matched_former.append(pos)
+
+    if not matched_current and not matched_former:
+        return (
+            "reject",
+            "No position in this person's LinkedIn history mentions the target company.",
+        )
+
+    if matched_current:
+        title_text = _normalize_for_match(
+            " ".join(p.get("title") or "" for p in matched_current)
+        )
+        title = (
+            next((p.get("title") for p in matched_current if p.get("title")), "") or ""
+        )
+        if any(kw in title_text for kw in _INTERN_KEYWORDS_NORMALIZED):
+            return (
+                "intern",
+                f"Current intern/trainee at target company ({title.strip()}).",
+            )
+        if any(kw in title_text for kw in _LEADERSHIP_KEYWORDS_NORMALIZED):
+            return (
+                "leadership",
+                f"Current employee in a senior/leadership role at target company ({title.strip()}).",
+            )
+        return (
+            "current_employee",
+            f"Current employee at target company ({title.strip()}).",
+        )
+
+    title = next((p.get("title") for p in matched_former if p.get("title")), "") or ""
+    return "former_employee", f"Former employee at target company ({title.strip()})."
+
 
 def _current_position(
     employee: Dict[str, Any], matched_domain: str
 ) -> Optional[Dict[str, Any]]:
+    domain_keyword = _domain_keyword(matched_domain)
     for pos in employee.get("all_positions", []) or []:
-        company_name = (pos.get("company_name") or "").lower()
-        if matched_domain and matched_domain.split(".")[
-            0
-        ].lower() in company_name.replace("-", " ").replace("_", " "):
+        if _position_matches_target(pos.get("company_name"), domain_keyword, None):
             return pos
     return None
 
 
-def aggregate_employees(company_dir: Path) -> List[Dict[str, Any]]:
+def aggregate_employees(
+    company_dir: Path, company_name: Optional[str] = None
+) -> List[Dict[str, Any]]:
     """Load the enriched employees.json (falls back to employees_raw.json
     only if the enriched file is absent), deduplicated by LinkedIn public
     identifier / profile URL, trimmed to the fields relevant for the next
     LLM stage (full position history and education are kept, but redundant
-    raw-scrape wrapper fields are dropped)."""
+    raw-scrape wrapper fields are dropped). Each entry is also tagged with
+    an `employee_tier` / `tier_reason` reliability ranking, and carries
+    through both `linkedin_url` and Stage B's `additional_profiles`
+    (maigret-discovered social links) so downstream stages don't have to
+    re-derive either."""
     employees = load_list(company_dir / "employees.json")
     used_raw = False
     if not employees:
@@ -292,6 +556,13 @@ def aggregate_employees(company_dir: Path) -> List[Dict[str, Any]]:
                 "emails": raw.get("emails", []),
                 "matched_domain": emp.get("search_target"),
                 "source": "raw-linkedin-search",
+                "additional_profiles": [],
+                # Raw (pre-enrichment) records have no position history to
+                # tier against - default to keeping them rather than
+                # silently rejecting for lack of data.
+                "employee_tier": "current_employee",
+                "tier_reason": "Raw discovery data only; position history "
+                "unavailable to assess target-company tenure.",
             }
         else:
             key = (
@@ -302,6 +573,9 @@ def aggregate_employees(company_dir: Path) -> List[Dict[str, Any]]:
             if not key:
                 continue
             matched_domain = emp.get("matched_domain", "")
+            tier, tier_reason = classify_employee_tier(
+                emp, matched_domain, company_name
+            )
             merged[key] = {
                 "name": emp.get("name"),
                 "job_title": emp.get("job_title"),
@@ -318,6 +592,9 @@ def aggregate_employees(company_dir: Path) -> List[Dict[str, Any]]:
                 "matched_domain": matched_domain,
                 "source": emp.get("source"),
                 "additional_profiles": emp.get("additional_profiles", []),
+                "employee_tier": tier,
+                "employee_tier_rank": EMPLOYEE_TIER_ORDER.index(tier),
+                "tier_reason": tier_reason,
             }
 
     result = list(merged.values())
@@ -420,6 +697,7 @@ def build_slim_context(aggregate: Dict[str, Any]) -> Dict[str, Any]:
             }
             for e in aggregate["emails"]
         ],
+        "email_domains": aggregate.get("email_domains", []),
         "documents": [
             {
                 "filename": d["filename"],
@@ -434,7 +712,9 @@ def build_slim_context(aggregate: Dict[str, Any]) -> Dict[str, Any]:
                 "name": e["name"],
                 "job_title": e.get("job_title"),
                 "linkedin_url": e.get("linkedin_url"),
+                "additional_profiles": e.get("additional_profiles", []),
                 "matched_domain": e.get("matched_domain"),
+                "employee_tier": e.get("employee_tier"),
             }
             for e in aggregate["employees"]
         ],
@@ -495,12 +775,14 @@ def main() -> None:
 
     domains = aggregate_domains(company_dir)
     emails = aggregate_emails(company_dir)
+    email_domains = summarize_email_domains(emails)
     documents = aggregate_documents(company_dir)
-    employees = aggregate_employees(company_dir)
+    employees = aggregate_employees(company_dir, args.company)
     breaches = aggregate_breaches(company_dir)
     darkweb = aggregate_darkweb(company_dir)
     dns_infra = load_dict(company_dir / "dns_infra.json")
     infrastructure_raw = load_dict(company_dir / "domain_discovery_raw.json")
+    dns_infra_raw = load_dict(company_dir / "dns_infra_raw.json")
 
     counts = {
         "Domains": len(domains),
@@ -508,14 +790,29 @@ def main() -> None:
         "  - deliverable": sum(
             1 for e in emails if e["validation_status"] == "deliverable"
         ),
+        "  - catch-all domains": sum(
+            1 for d in email_domains if d["confirmed_catch_all"]
+        ),
         "Documents": len(documents),
         "  - found on disk": sum(1 for d in documents if d["file_exists"]),
         "  - content verified": sum(1 for d in documents if d["content_verified"]),
         "Employees": len(employees),
+        "  - leadership": sum(
+            1 for e in employees if e.get("employee_tier") == "leadership"
+        ),
+        "  - current_employee": sum(
+            1 for e in employees if e.get("employee_tier") == "current_employee"
+        ),
+        "  - intern": sum(1 for e in employees if e.get("employee_tier") == "intern"),
+        "  - former_employee": sum(
+            1 for e in employees if e.get("employee_tier") == "former_employee"
+        ),
+        "  - reject": sum(1 for e in employees if e.get("employee_tier") == "reject"),
         "Breach records": len(breaches),
         "Dark web targets scanned": len(darkweb),
         "  - with mentions found": sum(1 for d in darkweb if d["mentions"]),
         "Infrastructure raw targets": len(infrastructure_raw),
+        "DNS infra raw targets": len(dns_infra_raw),
     }
 
     aggregate: Dict[str, Any] = {
@@ -524,11 +821,13 @@ def main() -> None:
         "domains": domains,
         "dns_infra": dns_infra,
         "emails": emails,
+        "email_domains": email_domains,
         "documents": documents,
         "employees": employees,
         "breaches": breaches,
         "darkweb": darkweb,
         "infrastructure_raw": infrastructure_raw,
+        "dns_infra_raw": dns_infra_raw,
         "counts": counts,
     }
 

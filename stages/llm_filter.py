@@ -96,6 +96,7 @@ from lib.llm.emails import (
     EMAIL_INSTRUCTIONS,
     enforce_email_tier_rules,
     enforce_catchall_tagging,
+    reconcile_unverifiable_pattern_guesses,
     is_infrastructure_hostname_email,
 )
 from lib.llm.employees import (
@@ -190,10 +191,26 @@ def main() -> None:
     # --- Infrastructure Insights ---------------------------------------
     logger.info("Filtering infrastructure raw data...")
     infra_raw_dict = aggregate.get("infrastructure_raw", {})
+    dns_infra_raw_dict = aggregate.get("dns_infra_raw", {})
     infra_records = []
 
-    for domain, data in infra_raw_dict.items():
-        rec = dict(data)
+    # Merge by target domain: infrastructure_raw carries theHarvester/
+    # SpiderFoot, dns_infra_raw carries raw_amass_records/
+    # raw_certspotter_issuances + the surfaced_network_footprint (IP/ASN/
+    # ISP) block from dns_infra_discovery.py. A domain can appear in
+    # either or both. (Field names confirmed against a real
+    # dns_infra_raw.json sample.)
+    for domain in sorted(set(infra_raw_dict) | set(dns_infra_raw_dict)):
+        rec = dict(infra_raw_dict.get(domain) or {})
+        dns_data = dns_infra_raw_dict.get(domain) or {}
+        if isinstance(dns_data, dict):
+            for key in (
+                "raw_amass_records",
+                "raw_certspotter_issuances",
+                "surfaced_network_footprint",
+            ):
+                if key in dns_data:
+                    rec[key] = dns_data[key]
         rec["target_domain"] = domain
         infra_records.append(rec)
 
@@ -250,11 +267,15 @@ def main() -> None:
         **common_kwargs,
     )
     excluded.extend(llm_excluded)
-    output["emails"] = {"kept": kept, "excluded": excluded}
     enforce_email_tier_rules(kept, warnings)
     enforce_email_tier_rules(excluded, warnings)
     enforce_catchall_tagging(kept, warnings)
     enforce_catchall_tagging(excluded, warnings)
+    # Must run AFTER the two tier-correction backstops above, since it
+    # relies on their corrected tiers (not the model's raw ones) to decide
+    # what actually needs to move from kept to excluded.
+    kept, excluded = reconcile_unverifiable_pattern_guesses(kept, excluded, warnings)
+    output["emails"] = {"kept": kept, "excluded": excluded}
 
     # --- Employees -------------------------------------------------
     logger.info("Filtering employees...")

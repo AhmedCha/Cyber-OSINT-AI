@@ -14,8 +14,7 @@ keys are centralized in a single `.env` file.
 
 ## Prerequisites
 
-- **Docker** and **Docker Compose** (v2 syntax - `docker compose`, not
-  the older `docker-compose`)
+- **Docker** and **Docker Compose**
 - **Python 3.10+** with `pip`, for the host-side orchestration scripts
   (`configure_tools.py`, `config.py`, and everything under `stages/`)
 - **Linux or macOS** - the install/pipeline scripts are Bash and assume

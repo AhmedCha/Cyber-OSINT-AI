@@ -169,9 +169,7 @@ def run_apify_linkedin_search(
         "profileScraperMode": "Full",
         "search": search_query,
         "maxItems": max_items,
-        "locations": [],
-        "startPage": 1,
-        "takePages": 1,
+        "locations": ["tunis", "tunisia"],
     }
 
     return run_apify_actor(actor_id, run_input)

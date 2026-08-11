@@ -32,6 +32,7 @@ from docx import Document
 from docx.document import Document as DocxDocument
 from docx.enum.table import WD_TABLE_ALIGNMENT
 from docx.enum.text import WD_ALIGN_PARAGRAPH
+from docx.opc.constants import RELATIONSHIP_TYPE
 from docx.oxml import OxmlElement
 from docx.oxml.ns import qn
 from docx.shared import Pt, RGBColor
@@ -57,11 +58,6 @@ TOOLS_USED = (
     "summarization."
 )
 
-# NOTE: breach_lookup.py and darkweb_discovery.py were not available when
-# this report generator was written, so the notices below use standard,
-# conservative data-handling language rather than text copied verbatim from
-# those scripts' own comments. If those files contain specific required
-# wording, replace NOTICE_TEXT_BREACH / NOTICE_TEXT_DARKWEB below with it.
 NOTICE_TEXT_BREACH = (
     "This section contains information about potential credential and "
     "personal data exposure sourced from third-party breach databases. It "
@@ -105,7 +101,49 @@ def shade_paragraph(paragraph, fill_hex: str) -> None:
     pPr.append(shd)
 
 
-def add_table(doc: DocxDocument, headers: List[str], rows: List[List[str]]) -> None:
+def add_hyperlink(
+    paragraph: Any,
+    url: str,
+    text: str,
+    color: str = "0000FF",
+    underline: bool = True,
+) -> Any:
+    """Adds a clickable hyperlink to a paragraph using underlying docx.oxml elements."""
+    part = paragraph.part
+    r_id = part.relate_to(url, RELATIONSHIP_TYPE.HYPERLINK, is_external=True)
+
+    hyperlink = OxmlElement("w:hyperlink")
+    hyperlink.set(qn("r:id"), r_id)
+
+    new_run = OxmlElement("w:r")
+    rPr = OxmlElement("w:rPr")
+
+    if color:
+        c = OxmlElement("w:color")
+        c.set(qn("w:val"), color)
+        rPr.append(c)
+
+    if underline:
+        u = OxmlElement("w:u")
+        u.set(qn("w:val"), "single")
+        rPr.append(u)
+
+    new_run.append(rPr)
+    new_run.text = text
+    hyperlink.append(new_run)
+    paragraph._p.append(hyperlink)
+
+    return hyperlink
+
+
+def add_table(doc: DocxDocument, headers: List[str], rows: List[List[Any]]) -> None:
+    """Renders a standard docx table.
+
+    Each cell value can be:
+      - A string/number (rendered as text)
+      - A (display_text, url) tuple or dict with 'url'/'text' (rendered as a clickable hyperlink)
+      - None or empty string (rendered as '-')
+    """
     table = doc.add_table(rows=1, cols=len(headers))
     table.style = "Table Grid"
     table.alignment = WD_TABLE_ALIGNMENT.CENTER
@@ -120,7 +158,16 @@ def add_table(doc: DocxDocument, headers: List[str], rows: List[List[str]]) -> N
     for row_values in rows:
         cells = table.add_row().cells
         for i, value in enumerate(row_values):
-            cells[i].text = "" if value is None else str(value)
+            cells[i].text = ""
+            if isinstance(value, tuple) and len(value) == 2 and value[1]:
+                text, url = value
+                add_hyperlink(cells[i].paragraphs[0], str(url), str(text or url))
+            elif isinstance(value, dict) and value.get("url"):
+                url = str(value["url"])
+                text = str(value.get("text") or url)
+                add_hyperlink(cells[i].paragraphs[0], url, text)
+            else:
+                cells[i].paragraphs[0].text = "-" if value in (None, "") else str(value)
 
     doc.add_paragraph()  # spacing after table
 
@@ -313,6 +360,55 @@ def build_infrastructure_section(doc: DocxDocument, data: Dict[str, Any]) -> Non
 # EMPLOYEES
 # =====================================================================
 
+EMPLOYEE_TIER_SORT_ORDER = {
+    "leadership": 0,
+    "current_employee": 1,
+    "intern": 2,
+    "former_employee": 3,
+}
+EMPLOYEE_TIER_LABELS = {
+    "leadership": "Leadership",
+    "current_employee": "Current Employee",
+    "intern": "Intern",
+    "former_employee": "Former Employee",
+}
+
+
+def _employee_tier(e: Dict[str, Any]) -> str:
+    verdict = e.get("_llm_verdict") or {}
+    return e.get("employee_tier") or verdict.get("tier") or ""
+
+
+def _employee_tier_sort_key(e: Dict[str, Any]) -> int:
+    return EMPLOYEE_TIER_SORT_ORDER.get(
+        _employee_tier(e), len(EMPLOYEE_TIER_SORT_ORDER)
+    )
+
+
+def _employee_social_links(e: Dict[str, Any]) -> List[str]:
+    lines: List[str] = []
+    seen_urls = set()
+
+    linkedin_url = e.get("linkedin_url")
+    if linkedin_url and linkedin_url not in seen_urls:
+        lines.append(f"LinkedIn: {linkedin_url}")
+        seen_urls.add(linkedin_url)
+
+    for entry in e.get("additional_profiles") or []:
+        if not isinstance(entry, dict):
+            continue
+        for platform in entry.get("platforms") or []:
+            if not isinstance(platform, dict):
+                continue
+            url = platform.get("url")
+            if not url or url in seen_urls:
+                continue
+            site = platform.get("site") or "Profile"
+            lines.append(f"{site}: {url}")
+            seen_urls.add(url)
+
+    return lines
+
 
 def build_employees_section(doc: DocxDocument, data: Dict[str, Any]) -> None:
     employees_kept = data.get("employees", {}).get("kept", [])
@@ -322,26 +418,39 @@ def build_employees_section(doc: DocxDocument, data: Dict[str, Any]) -> None:
     add_section_heading(doc, "Employees", level=1)
     doc.add_paragraph(
         "Individuals below were identified as publicly associated with the "
-        "target organization, primarily via professional networking profiles."
+        "target organization, primarily via professional networking profiles. "
+        "Listed by confidence in their connection to the target company "
+        "(leadership, then current employees, interns, and former employees)."
     )
 
+    sorted_employees = sorted(employees_kept, key=_employee_tier_sort_key)
+
     rows = []
-    for e in employees_kept:
+    for e in sorted_employees:
         verdict = e.get("_llm_verdict") or {}
         connection = verdict.get("connection_to_target") or "-"
         key_facts = verdict.get("key_facts") or []
+        tier = _employee_tier(e)
         rows.append(
             [
                 e.get("name", "-"),
+                EMPLOYEE_TIER_LABELS.get(tier, tier or "-"),
                 e.get("job_title") or "-",
                 connection,
                 key_facts,
-                e.get("linkedin_url") or "-",
+                _employee_social_links(e) or ["-"],
             ]
         )
     add_multiline_table(
         doc,
-        ["Name", "Job Title", "Connection to Target", "Key Facts", "Profile URL"],
+        [
+            "Name",
+            "Tier",
+            "Job Title",
+            "Connection to Target",
+            "Key Facts",
+            "Social Links",
+        ],
         rows,
     )
 
@@ -351,6 +460,21 @@ def build_employees_section(doc: DocxDocument, data: Dict[str, Any]) -> None:
 # =====================================================================
 
 
+def _email_domain(email: Optional[str]) -> str:
+    if not email or "@" not in email:
+        return ""
+    return email.split("@", 1)[1].strip().lower()
+
+
+def _pattern_preference_rank(email: str) -> int:
+    local = email.split("@", 1)[0] if "@" in email else email
+    if "." in local:
+        return 0
+    if "_" in local:
+        return 1
+    return 2
+
+
 def build_emails_section(doc: DocxDocument, data: Dict[str, Any]) -> None:
     emails_kept = data.get("emails", {}).get("kept", [])
     if not emails_kept:
@@ -358,27 +482,68 @@ def build_emails_section(doc: DocxDocument, data: Dict[str, Any]) -> None:
 
     add_section_heading(doc, "Emails", level=1)
 
-    rows = []
-    for e in emails_kept:
-        verdict = e.get("_llm_verdict") or {}
-        rows.append(
+    email_domains = data.get("email_domains", []) or []
+    catchall_domains = {
+        d.get("domain") for d in email_domains if d.get("confirmed_catch_all")
+    }
+
+    verified_emails = [
+        e for e in emails_kept if _email_domain(e.get("email")) not in catchall_domains
+    ]
+    catchall_emails = [
+        e for e in emails_kept if _email_domain(e.get("email")) in catchall_domains
+    ]
+
+    if verified_emails:
+        rows = []
+        for e in verified_emails:
+            verdict = e.get("_llm_verdict") or {}
+            rows.append(
+                [
+                    e.get("email", ""),
+                    e.get("employee") or "-",
+                    e.get("validation_status", "-"),
+                    verdict.get("tier", "-"),
+                ]
+            )
+        add_table(
+            doc,
             [
-                e.get("email", ""),
-                e.get("employee") or "-",
-                e.get("validation_status", "-"),
-                verdict.get("tier", "-"),
-            ]
+                "Email Address",
+                "Associated Employee",
+                "Validation Status",
+                "Confidence Tier",
+            ],
+            rows,
         )
-    add_table(
-        doc,
-        [
-            "Email Address",
-            "Associated Employee",
-            "Validation Status",
-            "Confidence Tier",
-        ],
-        rows,
-    )
+
+    domains_present = sorted({_email_domain(e.get("email")) for e in catchall_emails})
+    for domain in domains_present:
+        domain_emails = [
+            e for e in catchall_emails if _email_domain(e.get("email")) == domain
+        ]
+        doc.add_paragraph(
+            f"Email validation for {domain} was inconclusive - this mail server "
+            f"accepts all addresses (catch-all configuration), so individual "
+            f"mailbox existence cannot be confirmed via SMTP. "
+            f"{len(domain_emails)} name-pattern-based candidates were generated "
+            f"but are unverified."
+        )
+
+        best_per_employee: Dict[str, str] = {}
+        for e in domain_emails:
+            employee = e.get("employee") or "-"
+            email = e.get("email") or ""
+            current = best_per_employee.get(employee)
+            if current is None or _pattern_preference_rank(
+                email
+            ) < _pattern_preference_rank(current):
+                best_per_employee[employee] = email
+        add_table(
+            doc,
+            ["Employee", "Most Likely Address"],
+            [[name, addr] for name, addr in sorted(best_per_employee.items())],
+        )
 
 
 # =====================================================================
@@ -398,16 +563,25 @@ def build_documents_section(doc: DocxDocument, data: Dict[str, Any]) -> None:
         "domain(s), with a one-line usability summary for each."
     )
 
-    rows = [
-        [
-            d.get("filename", ""),
-            d.get("source_domain", ""),
-            (d.get("usability") or "-").capitalize(),
-            d.get("summary") or "-",
-        ]
-        for d in usable_docs
-    ]
-    add_table(doc, ["Filename", "Source Domain", "Usability", "Summary"], rows)
+    rows = []
+    for d in usable_docs:
+        url = d.get("url")
+        url_cell = (url, url) if url else "-"
+        rows.append(
+            [
+                d.get("filename", ""),
+                d.get("source_domain", ""),
+                url_cell,
+                (d.get("usability") or "-").capitalize(),
+                d.get("summary") or "-",
+            ]
+        )
+
+    add_table(
+        doc,
+        ["Filename", "Source Domain", "Source URL", "Usability", "Summary"],
+        rows,
+    )
 
 
 # =====================================================================
@@ -550,7 +724,7 @@ def build_appendix(doc: DocxDocument, data: Dict[str, Any]) -> None:
     add_section_heading(doc, "Exclusion Counts", level=2)
     add_table(doc, ["Category", "Count"], summary_rows)
 
-    for _key, label, records, id_field in exclusion_map:
+    for _, label, records, id_field in exclusion_map:
         if not records:
             continue
         add_section_heading(doc, label, level=2)

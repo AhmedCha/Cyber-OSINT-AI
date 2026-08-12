@@ -46,10 +46,18 @@ logger = logging.getLogger(__name__)
 # CONFIG / STYLE CONSTANTS
 # =====================================================================
 
-HEADER_FILL = "D9D9D9"  # light gray table header shading
+# --- Color palette ---------------------------------------------------
+# A small, consistent set of colors used throughout the report. Kept
+# deliberately muted/professional (navy + slate teal) rather than
+# bright/saturated so it reads well printed or on screen.
+PRIMARY_COLOR = RGBColor(0x1F, 0x3B, 0x57)  # dark navy - titles, primary emphasis
+ACCENT_COLOR = RGBColor(0x2E, 0x86, 0xAB)  # slate teal - subtitles, rules, accents
+HEADING_COLOR = RGBColor(0x1F, 0x3B, 0x57)  # navy - all section heading text
+TABLE_HEADER_BG = "D9E4EE"  # light blue-gray table header shading (CLEAR, not SOLID)
+TABLE_ALT_ROW_BG = "F2F6FA"  # very light zebra-stripe shading for longer tables
+
 NOTICE_FILL = "FCE8E8"  # pale red callout background
 NOTICE_TEXT_COLOR = RGBColor(0x8A, 0x1F, 0x11)
-ACCENT_COLOR = RGBColor(0x1F, 0x3B, 0x57)
 
 TOOLS_USED = (
     "theHarvester, SpiderFoot, Amass, crt.sh/certificate-transparency, "
@@ -153,10 +161,13 @@ def add_table(doc: DocxDocument, headers: List[str], rows: List[List[Any]]) -> N
         header_cells[i].text = ""
         run = header_cells[i].paragraphs[0].add_run(header)
         run.bold = True
-        shade_cell(header_cells[i], HEADER_FILL)
+        shade_cell(header_cells[i], TABLE_HEADER_BG)
 
-    for row_values in rows:
+    for row_index, row_values in enumerate(rows):
         cells = table.add_row().cells
+        if row_index % 2 == 1:
+            for cell in cells:
+                shade_cell(cell, TABLE_ALT_ROW_BG)
         for i, value in enumerate(row_values):
             cells[i].text = ""
             if isinstance(value, tuple) and len(value) == 2 and value[1]:
@@ -186,10 +197,13 @@ def add_multiline_table(
     for i, header in enumerate(headers):
         run = header_cells[i].paragraphs[0].add_run(header)
         run.bold = True
-        shade_cell(header_cells[i], HEADER_FILL)
+        shade_cell(header_cells[i], TABLE_HEADER_BG)
 
-    for row_values in rows:
+    for row_index, row_values in enumerate(rows):
         cells = table.add_row().cells
+        if row_index % 2 == 1:
+            for cell in cells:
+                shade_cell(cell, TABLE_ALT_ROW_BG)
         for i, value in enumerate(row_values):
             cell = cells[i]
             cell.paragraphs[0].text = ""
@@ -220,10 +234,27 @@ def add_notice(doc: DocxDocument, text: str, label: str = "HANDLING NOTICE") -> 
     run_text.font.color.rgb = NOTICE_TEXT_COLOR
 
 
+def add_horizontal_rule(doc: DocxDocument) -> None:
+    """Adds a subtle colored horizontal rule as a paragraph bottom border
+    (not a 1-cell table) - used to visually separate major sections."""
+    p = doc.add_paragraph()
+    p.paragraph_format.space_before = Pt(4)
+    p.paragraph_format.space_after = Pt(12)
+    pPr = p._p.get_or_add_pPr()
+    pBdr = OxmlElement("w:pBdr")
+    bottom = OxmlElement("w:bottom")
+    bottom.set(qn("w:val"), "single")
+    bottom.set(qn("w:sz"), "6")
+    bottom.set(qn("w:space"), "1")
+    bottom.set(qn("w:color"), str(ACCENT_COLOR))
+    pBdr.append(bottom)
+    pPr.append(pBdr)
+
+
 def add_section_heading(doc: DocxDocument, text: str, level: int = 1) -> None:
     heading = doc.add_heading(text, level=level)
     for run in heading.runs:
-        run.font.color.rgb = ACCENT_COLOR
+        run.font.color.rgb = HEADING_COLOR
 
 
 def format_timestamp(iso_str: Optional[str]) -> str:
@@ -244,6 +275,8 @@ def format_timestamp(iso_str: Optional[str]) -> str:
 def build_title_page(doc: DocxDocument, data: Dict[str, Any], report_date: str) -> None:
     title = doc.add_heading(data.get("company", "Unknown Company"), level=0)
     title.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    for run in title.runs:
+        run.font.color.rgb = PRIMARY_COLOR
 
     subtitle = doc.add_paragraph()
     subtitle.alignment = WD_ALIGN_PARAGRAPH.CENTER
@@ -334,6 +367,7 @@ def build_infrastructure_section(doc: DocxDocument, data: Dict[str, Any]) -> Non
     if not domains_kept and not dns_rows:
         return
 
+    add_horizontal_rule(doc)
     add_section_heading(doc, "Infrastructure", level=1)
 
     if domains_kept:
@@ -415,6 +449,7 @@ def build_employees_section(doc: DocxDocument, data: Dict[str, Any]) -> None:
     if not employees_kept:
         return
 
+    add_horizontal_rule(doc)
     add_section_heading(doc, "Employees", level=1)
     doc.add_paragraph(
         "Individuals below were identified as publicly associated with the "
@@ -480,6 +515,7 @@ def build_emails_section(doc: DocxDocument, data: Dict[str, Any]) -> None:
     if not emails_kept:
         return
 
+    add_horizontal_rule(doc)
     add_section_heading(doc, "Emails", level=1)
 
     email_domains = data.get("email_domains", []) or []
@@ -557,6 +593,7 @@ def build_documents_section(doc: DocxDocument, data: Dict[str, Any]) -> None:
     if not usable_docs:
         return
 
+    add_horizontal_rule(doc)
     add_section_heading(doc, "Documents", level=1)
     doc.add_paragraph(
         "Publicly accessible documents discovered on the target organization's "
@@ -594,6 +631,7 @@ def build_breach_section(doc: DocxDocument, data: Dict[str, Any]) -> None:
     if not breaches_kept:
         return
 
+    add_horizontal_rule(doc)
     add_section_heading(doc, "Breach Exposure", level=1)
     add_notice(doc, NOTICE_TEXT_BREACH)
 
@@ -621,6 +659,7 @@ def build_darkweb_section(doc: DocxDocument, data: Dict[str, Any]) -> None:
     if not all_targets:
         return
 
+    add_horizontal_rule(doc)
     add_section_heading(doc, "Dark Web Mentions", level=1)
     add_notice(doc, NOTICE_TEXT_DARKWEB)
 

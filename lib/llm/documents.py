@@ -98,6 +98,7 @@ def summarize_document(
         "filename": doc["filename"],
         "source_domain": doc["source_domain"],
         "filepath": doc["filepath"],
+        "url": doc.get("url"),
         "file_exists": doc["file_exists"],
         "content_verified": doc.get("content_verified", False),
         "summary": None,

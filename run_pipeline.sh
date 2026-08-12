@@ -61,6 +61,10 @@ run_stage() {
   local stage_name="$3"
   local script_name="$4"
   local company="$5"
+  shift 5
+  # Any remaining positional args are passed through to the stage script
+  # verbatim (e.g. --language FR for translate_report.py).
+  local extra_args=("$@")
 
   echo -e "${BLUE}====================================================${NC}"
   echo -e "${BLUE}Running Stage ${stage_num}/${total_stages}${NC}"
@@ -70,9 +74,9 @@ run_stage() {
   local stage_start
   stage_start=$(date +%s)
 
-  # Execute the python script with the company argument
+  # Execute the python script with the company argument (plus any extras)
   MODULE_NAME="${script_name%.py}"
-  if ! python3 -m "stages.${MODULE_NAME}" --company "${company}"; then
+  if ! python3 -m "stages.${MODULE_NAME}" --company "${company}" "${extra_args[@]}"; then
     echo -e "${RED}Stage failed:${NC}"
     echo -e "${RED}${stage_name}${NC}"
     exit 1
@@ -107,18 +111,27 @@ pause_step() {
 # =====================================================================
 
 PAUSE_FLAG=false
+LANGUAGE_CODE=""
 COMPANY=""
 
-# Parse arguments to support the --pause flag
+# Parse arguments to support the --pause and --language flags
 while [[ $# -gt 0 ]]; do
   case "$1" in
   --pause)
     PAUSE_FLAG=true
     shift
     ;;
+  --language)
+    if [[ -z "${2:-}" ]]; then
+      echo -e "${RED}--language requires a value, e.g. --language FR${NC}"
+      exit 1
+    fi
+    LANGUAGE_CODE="$2"
+    shift 2
+    ;;
   -*)
     echo -e "${RED}Unknown option: $1${NC}"
-    echo -e "${YELLOW}Usage: $0 [--pause] \"Company Name\"${NC}"
+    echo -e "${YELLOW}Usage: $0 [--pause] [--language <CODE>] \"Company Name\"${NC}"
     exit 1
     ;;
   *)
@@ -126,7 +139,7 @@ while [[ $# -gt 0 ]]; do
       COMPANY="$1"
     else
       echo -e "${RED}Too many arguments. Only one company name is allowed.${NC}"
-      echo -e "${YELLOW}Usage: $0 [--pause] \"Company Name\"${NC}"
+      echo -e "${YELLOW}Usage: $0 [--pause] [--language <CODE>] \"Company Name\"${NC}"
       exit 1
     fi
     shift
@@ -135,7 +148,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ -z "$COMPANY" ]]; then
-  echo -e "${YELLOW}Usage: $0 [--pause] \"Company Name\"${NC}"
+  echo -e "${YELLOW}Usage: $0 [--pause] [--language <CODE>] \"Company Name\"${NC}"
   exit 1
 fi
 
@@ -144,6 +157,9 @@ TOTAL_STAGES=${#STAGES[@]}
 echo -e "${GREEN}Starting OSINT Pipeline for company: ${COMPANY}${NC}\n"
 if [[ "${PAUSE_FLAG}" == true ]]; then
   echo -e "${YELLOW}Manual inspection mode enabled. The pipeline will pause after each stage.${NC}\n"
+fi
+if [[ -n "${LANGUAGE_CODE}" ]]; then
+  echo -e "${YELLOW}Report translation enabled. A ${LANGUAGE_CODE} translation will be generated after the report.${NC}\n"
 fi
 
 PIPELINE_START=$(date +%s)
@@ -186,6 +202,14 @@ for i in "${!STAGES[@]}"; do
   STAGE_NUM=$((i + 1))
 
   run_stage "$STAGE_NUM" "$TOTAL_STAGES" "$STAGE_NAME" "$SCRIPT_NAME" "$COMPANY"
+
+  # Optional: translate the report immediately after it's generated, if
+  # --language was passed. Entirely isolated - only runs when requested,
+  # and doesn't affect the numbered stage sequence above.
+  if [[ "$SCRIPT_NAME" == "generate_report.py" && -n "${LANGUAGE_CODE}" ]]; then
+    run_stage "$STAGE_NUM" "$TOTAL_STAGES" "Translate Report (${LANGUAGE_CODE})" \
+      "translate_report.py" "$COMPANY" --language "${LANGUAGE_CODE}"
+  fi
 
   # Trigger the manual inspection pause function
   pause_step

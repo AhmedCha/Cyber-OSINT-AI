@@ -269,6 +269,7 @@ def aggregate_documents(company_dir: Path) -> List[Dict[str, Any]]:
             "source_domain": source_domain,
             "discovery_method": discovery_method,
             "filepath": resolved_path,
+            "url": doc.get("url"),
             "file_exists": file_exists,
             "extracted_metadata": doc.get("extracted_metadata", {}),
             "content_verified": doc.get("content_verified", False),

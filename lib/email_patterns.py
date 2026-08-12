@@ -137,3 +137,52 @@ def generate_candidate_emails(
                     continue
 
     return candidates
+
+
+# Common role-based/company mailbox local-parts. Unlike personal
+# firstname.lastname@ guesses, these aren't tied to a specific employee -
+# they're generic addresses most companies publish for inbound contact.
+COMMON_ROLE_BASED_LOCAL_PARTS = [
+    "contact",
+    "info",
+    "support",
+    "sales",
+    "hr",
+    "admin",
+    "careers",
+    "jobs",
+    "marketing",
+    "press",
+    "help",
+    "billing",
+    "office",
+]
+
+
+def generate_role_based_emails(
+    target_domains: List[str],
+    confirmed_mailbox_domains: Optional[Set[str]] = None,
+) -> List[Dict[str, Any]]:
+    """Generates generic role-based/company mailbox candidates (contact@,
+    support@, info@, ...) for each target domain. These are generated once
+    per domain rather than per employee, since they aren't tied to any one
+    person. Uses the same infrastructure-hostname filtering as
+    generate_candidate_emails, for the same reason: a guessed contact@
+    mailbox on an MX hostname is just as structurally implausible as a
+    personal one."""
+    candidates = []
+    mailbox_domains = filter_personal_mailbox_domains(
+        target_domains, confirmed_mailbox_domains
+    )
+
+    for domain in mailbox_domains:
+        for local_part in COMMON_ROLE_BASED_LOCAL_PARTS:
+            candidates.append(
+                {
+                    "email": f"{local_part}@{domain}",
+                    "employee": None,
+                    "sources": ["Role-Based-Generation"],
+                }
+            )
+
+    return candidates

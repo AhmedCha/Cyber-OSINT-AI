@@ -32,6 +32,7 @@ JINA_READER_BASE = "https://r.jina.ai/"
 JINA_TIMEOUT_SECS = 20
 
 INVALID_PAGE_MARKERS = [
+    # --- Generic markers ---
     "404",
     "page not found",
     "user not found",
@@ -49,6 +50,64 @@ INVALID_PAGE_MARKERS = [
     "could not find this page",
     "account suspended",
     "this account doesn't exist",
+    # --- Instagram ---
+    "sorry, this page isn't available",
+    "the link you followed may be broken",
+    "the page may have been removed",
+    # --- Twitter / X ---
+    "this account doesn't exist",
+    "this profile doesn't exist",
+    "caution: this account is temporarily restricted",
+    "account has been suspended",
+    "this page doesn't exist. try searching for something else",
+    # --- Facebook ---
+    "this content isn't available right now",
+    "this content isn't available at the moment",
+    "the page you requested cannot be displayed",
+    "the link may be broken, or the page may have been removed",
+    # --- TikTok ---
+    "couldn't find this account",
+    "this account is private",
+    "this user's videos are currently unavailable",
+    # --- LinkedIn ---
+    "this linkedin page doesn't exist",
+    "the profile you're looking for is no longer available",
+    "profile can't be displayed",
+    # --- Reddit ---
+    "sorry, nobody on reddit goes by that name",
+    "page not found. the page you requested does not exist",
+    "this community has been banned",
+    "this community has been set to private",
+    # --- YouTube ---
+    "this channel doesn't exist",
+    "this page isn't available",
+    "404 error. this page isn't available",
+    # --- Pinterest ---
+    "we couldn't find those pins",
+    "this page isn't available",
+    "the user may have deleted their account",
+    # --- Snapchat ---
+    "sorry, that page doesn't exist",
+    "the snapchat account you're looking for can't be found",
+    # --- Telegram ---
+    "if you have telegram, you can contact",
+    "channel not found",
+    # --- Threads ---
+    "sorry, this page isn't available",
+    "the link may be broken, or the profile may have been removed",
+    # --- Discord ---
+    "instant invite invalid",
+    "this invite may be expired, or you might not have permission",
+    # --- GitHub ---
+    "not found",
+    "this is not the web page you are looking for",
+    # --- Tumblr ---
+    "there's nothing here",
+    "this tumblr doesn't exist",
+    # --- VK ---
+    "this page is blocked",
+    "this page has been deleted or has not been created",
+    "user not found",
 ]
 
 DEFAULT_POPULAR_SITES = [
@@ -169,7 +228,22 @@ def run_apify_linkedin_search(
         "profileScraperMode": "Full",
         "search": search_query,
         "maxItems": max_items,
-        "locations": ["tunis", "tunisia"],
+        "locations": [
+            # Country-level
+            "tunisia",
+            # Greater Tunis (highest density hub)
+            "tunis",
+            "ariana",
+            "ben arous",
+            "manouba",
+            # Northern cities
+            "nabeul",
+            "hammamet",
+            # Central / Sahel corridor (major industrial & tech presence)
+            "sousse",
+            "monastir",
+            "sfax",
+        ],
     }
 
     return run_apify_actor(actor_id, run_input)

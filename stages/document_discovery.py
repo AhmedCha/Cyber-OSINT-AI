@@ -15,8 +15,9 @@ import docx
 import pptx
 
 from lib.common import setup_logging, slugify_company
-from lib.config import load_env_file  # <--- Added import
+from lib.config import load_env_file
 from lib.docker_runner import run_docker_tool
+from lib.email_patterns import is_infrastructure_hostname
 from lib.json_utils import load_json, save_json
 from lib.search import generate_search_query_variants
 from lib.apify_utils import run_apify_actor
@@ -93,19 +94,28 @@ def run_metagoofil_for_domain(domain: str, output_dir: Path) -> List[Dict[str, A
 
 
 def run_apify_document_search(
-    company_name: str, domain: str, existing_filenames: Set[str], output_dir: Path
+    company_name: str,
+    domains: List[str],
+    existing_filenames: Set[str],
+    output_dir: Path,
 ) -> List[Dict[str, Any]]:
     """
-    Uses an Apify Google Search actor to find public document URLs.
+    Uses an Apify Google Search actor to find public document URLs across
+    the web and for specific target domains.
     """
-    logger.info(f"[{domain}] Running Apify document discovery for '{company_name}'...")
-    domain_out_dir = output_dir / "apify" / domain
-    domain_out_dir.mkdir(parents=True, exist_ok=True)
-
+    logger.info(f"Running Apify web-wide document discovery for '{company_name}'...")
     discovered_files: List[Dict[str, Any]] = []
 
+    # 1. Broad web-wide search queries for company variants
     query_variants = generate_search_query_variants(company_name)
-    queries = f"site:{domain}\n" + "\n".join([f'"{var}"' for var in query_variants])
+    queries_list = [f'"{var}"' for var in query_variants]
+
+    # 2. Targeted site queries for non-infrastructure target domains
+    for domain in domains:
+        if not is_infrastructure_hostname(domain):
+            queries_list.append(f"site:{domain}")
+
+    queries = "\n".join(queries_list)
 
     run_input = {
         "queries": queries,
@@ -122,7 +132,6 @@ def run_apify_document_search(
 
     # Iterate through the SERP objects
     for item in items:
-        # Extract the actual search results from the "organicResults" array
         organic_results = item.get("organicResults", [])
 
         for res in organic_results:
@@ -131,8 +140,17 @@ def run_apify_document_search(
                 continue
 
             parsed_url = urllib.parse.urlparse(url)
-            # Unquote the filename to handle URL-encoded characters (e.g., %20 -> space)
+            doc_domain = parsed_url.netloc or "web"
+
+            # Unquote filename to handle URL-encoded characters (e.g. %20 -> space)
             filename = urllib.parse.unquote(os.path.basename(parsed_url.path))
+
+            # Sanitize filename: replace unsafe filesystem characters to prevent unintended nested paths
+            unsafe_chars = ["/", "\\", "\x00", os.sep]
+            if os.altsep:
+                unsafe_chars.append(os.altsep)
+            for char in unsafe_chars:
+                filename = filename.replace(char, "_")
 
             ext = os.path.splitext(filename)[1].lstrip(".").lower()
             if not filename or ext not in DEFAULT_FILE_TYPES:
@@ -141,7 +159,10 @@ def run_apify_document_search(
             if filename in existing_filenames:
                 continue
 
+            domain_out_dir = output_dir / "apify" / doc_domain
+            domain_out_dir.mkdir(parents=True, exist_ok=True)
             dest_file = domain_out_dir / filename
+
             try:
                 req = urllib.request.Request(
                     url,
@@ -150,14 +171,43 @@ def run_apify_document_search(
                     },
                 )
                 with urllib.request.urlopen(req, timeout=15) as response:
-                    dest_file.write_bytes(response.read())
+                    content = response.read()
+                    content_type = response.headers.get("Content-Type", "").lower()
+
+                    # Verify content matches expected file type (Magic Bytes or Content-Type header)
+                    is_valid = False
+                    if ext == "pdf" and content.startswith(b"%PDF"):
+                        is_valid = True
+                    elif ext in ["docx", "pptx", "xlsx"] and content.startswith(b"PK"):
+                        is_valid = True
+                    elif any(
+                        valid_type in content_type
+                        for valid_type in [
+                            "pdf",
+                            "document",
+                            "msword",  # Word
+                            "presentation",
+                            "powerpoint",  # PPT
+                            "sheet",
+                            "excel",  # Excel
+                        ]
+                    ):
+                        is_valid = True
+
+                    if not is_valid:
+                        logger.warning(
+                            f"[{doc_domain}] Content verification failed for {url} (Ext: {ext}, Content-Type: {content_type}). Skipping save."
+                        )
+                        continue
+
+                    dest_file.write_bytes(content)
 
                 existing_filenames.add(filename)
                 discovered_files.append(
                     {
                         "filename": filename,
                         "filepath": str(dest_file),
-                        "domain": domain,
+                        "domain": doc_domain,
                         "source": "apify-google",
                         "url": url,
                         "extracted_metadata": {
@@ -165,9 +215,13 @@ def run_apify_document_search(
                         },
                     }
                 )
-                logger.debug(f"[{domain}] Successfully downloaded document: {filename}")
+                logger.debug(
+                    f"[{doc_domain}] Successfully downloaded document: {filename}"
+                )
             except Exception as e:
-                logger.warning(f"[{domain}] Failed to download Apify result {url}: {e}")
+                logger.warning(
+                    f"[{doc_domain}] Failed to download Apify result {url}: {e}"
+                )
 
     return discovered_files
 
@@ -332,7 +386,7 @@ def print_summary(results: List[Dict[str, Any]]) -> None:
 
 def main() -> None:
     setup_logging()
-
+    logging.getLogger("pypdf").setLevel(logging.CRITICAL)
     load_env_file()
 
     args = parse_arguments()
@@ -357,19 +411,25 @@ def main() -> None:
     all_document_records: List[Dict[str, Any]] = []
     seen_filenames: Set[str] = set()
 
+    # Part 1: Metagoofil Discovery per target domain
     for domain in domains:
-        # Part 1: Metagoofil
+        if is_infrastructure_hostname(domain):
+            logger.info(
+                f"Skipping infrastructure domain for Metagoofil discovery: {domain}"
+            )
+            continue
+
         mg_results = run_metagoofil_for_domain(domain, company_dir)
         for doc in mg_results:
             seen_filenames.add(doc["filename"])
             all_document_records.append(doc)
 
-        # Part 2: Apify Supplemental Dorks
-        ap_results = run_apify_document_search(
-            args.company, domain, seen_filenames, company_dir
-        )
-        for doc in ap_results:
-            all_document_records.append(doc)
+    # Part 2: Apify Web-Wide & Domain Google Search Discovery
+    ap_results = run_apify_document_search(
+        args.company, domains, seen_filenames, company_dir
+    )
+    for doc in ap_results:
+        all_document_records.append(doc)
 
     # Part 3: Content Verification
     final_output: List[Dict[str, Any]] = []

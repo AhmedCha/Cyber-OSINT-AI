@@ -11,7 +11,11 @@ from typing import Any, Dict, List, Set, Tuple
 from lib.common import setup_logging, slugify_company
 from lib.json_utils import load_json, save_json
 from lib.email_normalizer import is_valid_email, normalize_email
-from lib.email_patterns import deduce_patterns, generate_candidate_emails
+from lib.email_patterns import (
+    deduce_patterns,
+    generate_candidate_emails,
+    generate_role_based_emails,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -28,7 +32,7 @@ def run_theharvester_emails(target_domain: str) -> Set[str]:
 
     with tempfile.TemporaryDirectory() as tmpdir:
         try:
-            subprocess.run(
+            result = subprocess.run(
                 [
                     "docker",
                     "compose",
@@ -41,6 +45,8 @@ def run_theharvester_emails(target_domain: str) -> Set[str]:
                     target_domain,
                     "-b",
                     "all",
+                    "-l",
+                    "500",
                     "-f",
                     "/tmp/harvester_out",
                 ],
@@ -49,6 +55,12 @@ def run_theharvester_emails(target_domain: str) -> Set[str]:
                 timeout=450,
                 check=False,
             )
+
+            if result.returncode != 0:
+                logger.warning(
+                    f"[{target_domain}] theHarvester exited with code "
+                    f"{result.returncode}: {result.stderr.strip()[:300]}"
+                )
 
             output_file = Path(tmpdir) / "harvester_out.json"
             if not output_file.exists():
@@ -64,12 +76,22 @@ def run_theharvester_emails(target_domain: str) -> Set[str]:
         except Exception as e:
             logger.error(f"[{target_domain}] Failed to parse theHarvester output: {e}")
 
-    return emails
+    # Keep only mailboxes on the target domain itself - theHarvester's broad
+    # OSINT sources (search engines, cert transparency, etc.) can surface
+    # addresses on unrelated third-party domains that happen to mention
+    # the target company.
+    return set(e for e in emails if e.endswith(f"@{target_domain}"))
 
 
 def run_spiderfoot_emails(target_domain: str) -> Set[str]:
-    # Expanded SpiderFoot modules for deeper email enumeration
-    modules = "sfp_email,sfp_hunter,sfp_skymem,sfp_clearbit,sfp_github,sfp_spider"
+    # Expanded SpiderFoot modules for deeper email enumeration:
+    # sfp_intfiles mines public documents (PDF/Office files) for metadata
+    # emails, and sfp_pgp checks PGP keyservers, which often surface
+    # personal emails that never appear in a plain web search.
+    modules = (
+        "sfp_email,sfp_hunter,sfp_skymem,sfp_clearbit,sfp_github,sfp_spider,"
+        "sfp_intfiles,sfp_pgp"
+    )
     logger.info(f"[{target_domain}] Running SpiderFoot for emails ({modules})...")
     emails: Set[str] = set()
 
@@ -94,6 +116,12 @@ def run_spiderfoot_emails(target_domain: str) -> Set[str]:
             timeout=300,
             check=False,
         )
+
+        if process.returncode != 0:
+            logger.warning(
+                f"[{target_domain}] SpiderFoot exited with code "
+                f"{process.returncode}: {process.stderr.strip()[:300]}"
+            )
 
         for line in process.stdout.splitlines():
             try:
@@ -169,6 +197,27 @@ def apply_inferred_patterns(
                 email_inventory[email]["employee"] = item.get("employee")
 
 
+def apply_role_based_patterns(
+    target_domains: List[str],
+    email_inventory: Dict[str, Dict[str, Any]],
+) -> None:
+    """Adds generic company mailbox candidates (contact@, support@, info@, ...)
+    for each target domain, independent of any employee data."""
+    if not target_domains:
+        return
+
+    logger.info("Generating role-based company email candidates...")
+    role_based = generate_role_based_emails(target_domains)
+
+    for item in role_based:
+        email = item.get("email")
+        if email and is_valid_email(email):
+            if email not in email_inventory:
+                email_inventory[email] = item
+            elif "Role-Based-Generation" not in email_inventory[email]["sources"]:
+                email_inventory[email]["sources"].append("Role-Based-Generation")
+
+
 def print_discovery_summary(
     target_count: int, employee_count: int, candidate_count: int, output_file: Path
 ) -> None:
@@ -213,6 +262,7 @@ def main() -> None:
     apply_inferred_patterns(
         employees, target_domains, discovered_emails, email_inventory
     )
+    apply_role_based_patterns(target_domains, email_inventory)
 
     final_emails = []
     for email, data in email_inventory.items():

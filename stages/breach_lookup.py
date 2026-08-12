@@ -36,6 +36,12 @@ APIFY_BREACH_ACTOR_ID = "tsOZE5njcLbdFewtU"
 
 REQUEST_DELAY_SECONDS = 1.5  # pacing between requests
 
+CHECKABLE_VALIDATION_STATUSES = (
+    "deliverable",
+    "risky",
+    "smtp_inconclusive_catchall",
+)
+
 
 def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
@@ -144,13 +150,18 @@ def query_apify_breach_checker(emails: List[str]) -> Dict[str, List[Dict[str, An
 
 
 def print_summary(
-    checked: int, exposed: int, service_used: str, output_file: Path
+    checked: int,
+    exposed: int,
+    catchall_confirmed: int,
+    service_used: str,
+    output_file: Path,
 ) -> None:
     print("\n" + "=" * 55)
     print("           BREACH / PERSONAL INFO LOOKUP SUMMARY")
     print("=" * 55)
     print(f"Emails Checked        : {checked}")
     print(f"Emails With Exposure  : {exposed}")
+    print(f"Catch-all Emails Confirmed via Breach : {catchall_confirmed}")
     print(f"Service Used          : {service_used}")
     print("=" * 55)
     print(f"\nFinal output written to: {output_file.resolve()}")
@@ -182,11 +193,20 @@ def main() -> None:
         for c in candidates
         if isinstance(c, dict)
         and c.get("email")
-        and c.get("validation_status") in ("deliverable", "risky")
+        and c.get("validation_status") in CHECKABLE_VALIDATION_STATUSES
     ]
+    # Keep the originating validation_status per email so results can
+    # distinguish "already confirmed deliverable" from "catch-all, breach
+    # data is what's confirming it" - see the catchall_confirmed_by_breach
+    # flag below.
+    validation_status_by_email = {
+        c["email"]: c.get("validation_status")
+        for c in candidates
+        if isinstance(c, dict) and c.get("email") in emails
+    }
     logger.info(
-        f"Checking {len(emails)} validated emails via SpiderFoot "
-        f"({SPIDERFOOT_MODULES}) and Apify (actor {APIFY_BREACH_ACTOR_ID})..."
+        f"Checking {len(emails)} emails ({', '.join(CHECKABLE_VALIDATION_STATUSES)}) "
+        f"via SpiderFoot ({SPIDERFOOT_MODULES}) and Apify (actor {APIFY_BREACH_ACTOR_ID})..."
     )
     # Reminder, not a blocker: if HIBP_KEY/INTELX_KEY were added to .env
     # after the last seed_spiderfoot_db.py run, re-run that (container
@@ -200,6 +220,7 @@ def main() -> None:
 
     results: List[Dict[str, Any]] = []
     exposed_count = 0
+    catchall_confirmed_count = 0
 
     for email in emails:
         sf_events = query_spiderfoot_breaches(email)
@@ -215,17 +236,30 @@ def main() -> None:
 
         entry = {
             "email": email,
+            "validation_status": validation_status_by_email.get(email),
             "breaches": breaches,
             "services_checked": ["spiderfoot", "apify"],
         }
         if breaches:
             exposed_count += 1
+            # A breach hit against a catch-all/inconclusive address is
+            # independent evidence the mailbox is real, since breach data
+            # is tied to an exact address rather than an SMTP guess.
+            if validation_status_by_email.get(email) == "smtp_inconclusive_catchall":
+                entry["catchall_confirmed_by_breach"] = True
+                catchall_confirmed_count += 1
 
         results.append(entry)
         time.sleep(REQUEST_DELAY_SECONDS)
 
     save_json(output_file, results)
-    print_summary(len(results), exposed_count, "spiderfoot+apify", output_file)
+    print_summary(
+        len(results),
+        exposed_count,
+        catchall_confirmed_count,
+        "spiderfoot+apify",
+        output_file,
+    )
 
 
 if __name__ == "__main__":

@@ -446,6 +446,7 @@ def main() -> None:
                 "filename": doc["filename"],
                 "source_domain": doc["domain"],
                 "discovery_method": doc["source"],
+                "url": doc.get("url"),
                 "extracted_metadata": merged_meta,
                 "content_verified": verified,
             }

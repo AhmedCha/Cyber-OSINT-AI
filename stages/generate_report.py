@@ -66,15 +66,19 @@ TOOLS_USED = (
     "summarization."
 )
 
-NOTICE_TEXT_BREACH = (
-    "This section contains information about potential credential and "
-    "personal data exposure sourced from third-party breach databases. It "
-    "may include personally identifiable information (PII) about "
-    "individuals associated with the target organization. Handle in "
-    "accordance with your organization's data protection policy, restrict "
-    "distribution to authorized personnel, and do not use this information "
-    "for unauthorized access attempts of any kind."
-)
+
+def notice_text_breach(company_name: str) -> str:
+    return (
+        "This section contains information about potential credential and "
+        "personal data exposure sourced from third-party breach databases. It "
+        f"may include personally identifiable information (PII) about "
+        f"individuals associated with {company_name}. Handle in "
+        "accordance with your organization's data protection policy, restrict "
+        "distribution to authorized personnel, and do not use this information "
+        "for unauthorized access attempts of any kind."
+    )
+
+
 NOTICE_TEXT_DARKWEB = (
     "This section contains information gathered from dark web / onion "
     "network sources. Findings may reference illicit marketplaces, leak "
@@ -449,12 +453,14 @@ def build_employees_section(doc: DocxDocument, data: Dict[str, Any]) -> None:
     if not employees_kept:
         return
 
+    company_name = data.get("company", "Unknown Company")
+
     add_horizontal_rule(doc)
     add_section_heading(doc, "Employees", level=1)
     doc.add_paragraph(
-        "Individuals below were identified as publicly associated with the "
-        "target organization, primarily via professional networking profiles. "
-        "Listed by confidence in their connection to the target company "
+        f"Individuals below were identified as publicly associated with "
+        f"{company_name}, primarily via professional networking profiles. "
+        f"Listed by confidence in their connection to {company_name} "
         "(leadership, then current employees, interns, and former employees)."
     )
 
@@ -593,10 +599,12 @@ def build_documents_section(doc: DocxDocument, data: Dict[str, Any]) -> None:
     if not usable_docs:
         return
 
+    company_name = data.get("company", "Unknown Company")
+
     add_horizontal_rule(doc)
     add_section_heading(doc, "Documents", level=1)
     doc.add_paragraph(
-        "Publicly accessible documents discovered on the target organization's "
+        f"Publicly accessible documents discovered on {company_name}'s "
         "domain(s), with a one-line usability summary for each."
     )
 
@@ -631,9 +639,11 @@ def build_breach_section(doc: DocxDocument, data: Dict[str, Any]) -> None:
     if not breaches_kept:
         return
 
+    company_name = data.get("company", "Unknown Company")
+
     add_horizontal_rule(doc)
     add_section_heading(doc, "Breach Exposure", level=1)
-    add_notice(doc, NOTICE_TEXT_BREACH)
+    add_notice(doc, notice_text_breach(company_name))
 
     rows = []
     for b in breaches_kept:

@@ -40,6 +40,7 @@ from typing import Optional, Tuple
 import requests
 
 from lib.common import setup_logging, slugify_company
+from lib.config import load_env_file
 
 logger = logging.getLogger(__name__)
 
@@ -249,6 +250,7 @@ def find_source_report(company_dir: Path, company_slug: str) -> Optional[Path]:
 
 def main() -> None:
     setup_logging()
+    load_env_file()
     args = parse_arguments()
 
     api_key = os.environ.get(DEEPL_API_KEY_ENV, "").strip()

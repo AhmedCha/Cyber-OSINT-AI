@@ -16,6 +16,7 @@ from lib.docker_runner import run_docker_service_up, run_docker_tool
 from lib.json_utils import load_json, save_json
 from lib.search import generate_search_query_variants
 from lib.apify_utils import run_apify_actor
+from lib.db import get_db_connection, upsert_records
 
 # =====================================================================
 # CONFIGURATION & CONSTANTS
@@ -787,7 +788,19 @@ def main() -> None:
     save_json(output_file, enriched_employees, indent=2, ensure_ascii=False)
     save_json(output_raw_file, all_raw_items, indent=2, ensure_ascii=False)
 
-    # 5. Console Summary
+    # 5. Write to Database (Updated)
+    conn = get_db_connection()
+    # Using 'name' as the unique key field; update to 'public_identifier' or 'email' if preferred.
+    upsert_records(
+        conn=conn,
+        table="raw_employees",
+        company_slug=company_slug,
+        records=enriched_employees,
+        key_field="name",
+    )
+    conn.close()
+
+    # 6. Console Summary
     print_summary(
         target_labels,
         employees_found_count,

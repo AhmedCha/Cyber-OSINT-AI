@@ -16,6 +16,7 @@ from lib.email_patterns import (
     generate_candidate_emails,
     generate_role_based_emails,
 )
+from lib.db import get_db_connection, upsert_records
 
 logger = logging.getLogger(__name__)
 
@@ -76,18 +77,10 @@ def run_theharvester_emails(target_domain: str) -> Set[str]:
         except Exception as e:
             logger.error(f"[{target_domain}] Failed to parse theHarvester output: {e}")
 
-    # Keep only mailboxes on the target domain itself - theHarvester's broad
-    # OSINT sources (search engines, cert transparency, etc.) can surface
-    # addresses on unrelated third-party domains that happen to mention
-    # the target company.
     return set(e for e in emails if e.endswith(f"@{target_domain}"))
 
 
 def run_spiderfoot_emails(target_domain: str) -> Set[str]:
-    # Expanded SpiderFoot modules for deeper email enumeration:
-    # sfp_intfiles mines public documents (PDF/Office files) for metadata
-    # emails, and sfp_pgp checks PGP keyservers, which often surface
-    # personal emails that never appear in a plain web search.
     modules = (
         "sfp_email,sfp_hunter,sfp_skymem,sfp_clearbit,sfp_github,sfp_spider,"
         "sfp_intfiles,sfp_pgp"
@@ -201,8 +194,6 @@ def apply_role_based_patterns(
     target_domains: List[str],
     email_inventory: Dict[str, Dict[str, Any]],
 ) -> None:
-    """Adds generic company mailbox candidates (contact@, support@, info@, ...)
-    for each target domain, independent of any employee data."""
     if not target_domains:
         return
 
@@ -271,6 +262,15 @@ def main() -> None:
 
     final_emails.sort(key=lambda x: x["email"])
     save_json(output_file, final_emails)
+
+    # Save to db
+
+    try:
+        with get_db_connection() as conn:
+            upsert_records(conn, "raw_emails", company_slug, final_emails, "email")
+    except Exception as e:
+        logger.warning(f"Database sync failed for raw_emails: {e}")
+
     print_discovery_summary(
         len(target_domains), len(employees), len(final_emails), output_file
     )

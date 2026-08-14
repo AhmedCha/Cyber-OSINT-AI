@@ -14,6 +14,7 @@ from lib.network import (
     resolves_dns,
 )
 from lib.search import query_searxng
+from lib.db import get_db_connection, upsert_records
 
 # Constants
 SEARXNG_URL = "http://localhost:8080"
@@ -173,7 +174,7 @@ def main() -> None:
 
     domain_origins: Dict[str, List[str]] = {}
 
-    # 1. Query sources (passing the abbreviation)
+    # Query sources (passing the abbreviation)
     searxng_domains = search_searxng(company_name, abbreviation)
     for d in searxng_domains:
         domain_origins.setdefault(d, []).append("SearXNG")
@@ -182,14 +183,22 @@ def main() -> None:
         f"Collected {len(domain_origins)} lexically validated candidate domains."
     )
 
-    # 2. DNS Validation
+    # DNS Validation
     validated_domains = validate_candidates(domain_origins)
 
-    # 3. Save Output
+    # Save Output
     output_dir.mkdir(parents=True, exist_ok=True)
     save_json(output_file, validated_domains, indent=2)
 
-    # 4. Console Summary
+    try:
+        with get_db_connection() as conn:
+            upsert_records(
+                conn, "raw_domains", company_slug, validated_domains, "domain"
+            )
+    except Exception as e:
+        logger.warning(f"Database sync failed for raw_domains: {e}")
+
+    # Console Summary
     print_summary(
         company_name,
         len(domain_origins),

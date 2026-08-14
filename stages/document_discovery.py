@@ -21,16 +21,12 @@ from lib.email_patterns import is_infrastructure_hostname
 from lib.json_utils import load_json, save_json
 from lib.search import generate_search_query_variants
 from lib.apify_utils import run_apify_actor
+from lib.db import get_db_connection, upsert_records
 
 logger = logging.getLogger(__name__)
 
 DEFAULT_FILE_TYPES = ["pdf", "doc", "docx", "xls", "xlsx", "ppt", "pptx"]
 APIFY_GOOGLE_SEARCH_ACTOR_ID = "nFJndFXA5zjCTuudP"
-
-
-# =====================================================================
-# METAGOOFIL DISCOVERY (PART 1)
-# =====================================================================
 
 
 def run_metagoofil_for_domain(domain: str, output_dir: Path) -> List[Dict[str, Any]]:
@@ -88,11 +84,6 @@ def run_metagoofil_for_domain(domain: str, output_dir: Path) -> List[Dict[str, A
     return results
 
 
-# =====================================================================
-# APIFY GOOGLE DISCOVERY (PART 2)
-# =====================================================================
-
-
 def run_apify_document_search(
     company_name: str,
     domains: List[str],
@@ -106,11 +97,9 @@ def run_apify_document_search(
     logger.info(f"Running Apify web-wide document discovery for '{company_name}'...")
     discovered_files: List[Dict[str, Any]] = []
 
-    # 1. Broad web-wide search queries for company variants
     query_variants = generate_search_query_variants(company_name)
     queries_list = [f'"{var}"' for var in query_variants]
 
-    # 2. Targeted site queries for non-infrastructure target domains
     for domain in domains:
         if not is_infrastructure_hostname(domain):
             queries_list.append(f"site:{domain}")
@@ -130,7 +119,6 @@ def run_apify_document_search(
 
     items = run_apify_actor(APIFY_GOOGLE_SEARCH_ACTOR_ID, run_input)
 
-    # Iterate through the SERP objects
     for item in items:
         organic_results = item.get("organicResults", [])
 
@@ -141,11 +129,8 @@ def run_apify_document_search(
 
             parsed_url = urllib.parse.urlparse(url)
             doc_domain = parsed_url.netloc or "web"
-
-            # Unquote filename to handle URL-encoded characters (e.g. %20 -> space)
             filename = urllib.parse.unquote(os.path.basename(parsed_url.path))
 
-            # Sanitize filename: replace unsafe filesystem characters to prevent unintended nested paths
             unsafe_chars = ["/", "\\", "\x00", os.sep]
             if os.altsep:
                 unsafe_chars.append(os.altsep)
@@ -174,7 +159,6 @@ def run_apify_document_search(
                     content = response.read()
                     content_type = response.headers.get("Content-Type", "").lower()
 
-                    # Verify content matches expected file type (Magic Bytes or Content-Type header)
                     is_valid = False
                     if ext == "pdf" and content.startswith(b"%PDF"):
                         is_valid = True
@@ -185,11 +169,11 @@ def run_apify_document_search(
                         for valid_type in [
                             "pdf",
                             "document",
-                            "msword",  # Word
+                            "msword",
                             "presentation",
-                            "powerpoint",  # PPT
+                            "powerpoint",
                             "sheet",
-                            "excel",  # Excel
+                            "excel",
                         ]
                     ):
                         is_valid = True
@@ -224,11 +208,6 @@ def run_apify_document_search(
                 )
 
     return discovered_files
-
-
-# =====================================================================
-# CONTENT EXTRACTION & VERIFICATION (PART 3)
-# =====================================================================
 
 
 def extract_pdf_content(file_path: Path) -> Tuple[str, Dict[str, Any]]:
@@ -351,11 +330,6 @@ def verify_file_content(
     return verified, metadata
 
 
-# =====================================================================
-# CLI & MAIN PIPELINE
-# =====================================================================
-
-
 def parse_arguments() -> argparse.Namespace:
     parser = argparse.ArgumentParser(
         description="OSINT Stage: Document Discovery & Verification"
@@ -411,7 +385,6 @@ def main() -> None:
     all_document_records: List[Dict[str, Any]] = []
     seen_filenames: Set[str] = set()
 
-    # Part 1: Metagoofil Discovery per target domain
     for domain in domains:
         if is_infrastructure_hostname(domain):
             logger.info(
@@ -424,14 +397,12 @@ def main() -> None:
             seen_filenames.add(doc["filename"])
             all_document_records.append(doc)
 
-    # Part 2: Apify Web-Wide & Domain Google Search Discovery
     ap_results = run_apify_document_search(
         args.company, domains, seen_filenames, company_dir
     )
     for doc in ap_results:
         all_document_records.append(doc)
 
-    # Part 3: Content Verification
     final_output: List[Dict[str, Any]] = []
     for doc in all_document_records:
         verified, parsed_meta = verify_file_content(
@@ -454,6 +425,16 @@ def main() -> None:
 
     output_file = company_dir / "documents.json"
     save_json(output_file, final_output)
+
+    # Save to db
+
+    try:
+        with get_db_connection() as conn:
+            upsert_records(
+                conn, "raw_documents", company_slug, final_output, "filename"
+            )
+    except Exception as e:
+        logger.warning(f"Database sync failed for raw_documents: {e}")
 
     print_summary(final_output)
 

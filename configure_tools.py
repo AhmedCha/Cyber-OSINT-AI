@@ -6,6 +6,7 @@ import argparse
 import secrets
 import subprocess
 from dotenv import dotenv_values
+from lib.db import get_db_connection, init_db
 
 # ==============================================================================
 # CONFIGURATION / OUTPUT PATHS
@@ -153,27 +154,25 @@ SPIDERFOOT_MAPPING = {
     "sfp_zetalytics:api_key": "ZETALYTICS_KEY",
 }
 
-# NOTE: unlike SPIDERFOOT_MAPPING above (per-module options, scope = module
-# name), the SOCKS/Tor proxy is a GLOBAL SpiderFoot option, stored under a
-# different scope entirely - it has no module name to key off. The scope
-# value and the "_socksN..." option names below are SpiderFoot's commonly
-# documented global-option convention, but were NOT confirmed against a
-# live tbl_config dump before this was written. SAFEST way to confirm:
-# set the SOCKS proxy once via the SpiderFoot web UI (Settings -> General),
-# save it, then run:
-#   sqlite3 ./volumes/spiderfoot/spiderfoot.db \
-#     "SELECT * FROM tbl_config WHERE opt LIKE '%socks%';"
-# and adjust GLOBAL_CONFIG_SCOPE / GLOBAL_OPTIONS below to match exactly
-# what that query returns before relying on this seeding it automatically.
 GLOBAL_CONFIG_SCOPE = "GLOBAL"
 
 GLOBAL_OPTIONS = {
-    "_socks1type": "SPIDERFOOT_SOCKS_TYPE",  # confirmed values: '4','5','HTTP','TOR' - use 'TOR' for .onion targets, not '5'
-    "_socks2addr": "SPIDERFOOT_SOCKS_HOST",  # e.g. "tor" (compose service name)
-    "_socks3port": "SPIDERFOOT_SOCKS_PORT",  # e.g. "9050" (Tor's internal port)
-    "_socks4user": "SPIDERFOOT_SOCKS_USER",  # usually blank for this setup
-    "_socks5pwd": "SPIDERFOOT_SOCKS_PASS",  # usually blank for this setup
+    "_socks1type": "SPIDERFOOT_SOCKS_TYPE",
+    "_socks2addr": "SPIDERFOOT_SOCKS_HOST",
+    "_socks3port": "SPIDERFOOT_SOCKS_PORT",
+    "_socks4user": "SPIDERFOOT_SOCKS_USER",
+    "_socks5pwd": "SPIDERFOOT_SOCKS_PASS",
 }
+
+
+def initialize_database():
+    print("[*] Initializing shared SQLite database schema...")
+    try:
+        with get_db_connection() as conn:
+            init_db(conn)
+        print("[+] Database schema initialized successfully.")
+    except Exception as e:
+        print(f"[ERROR] Failed to initialize database schema: {e}")
 
 
 def generate_theharvester_yaml(env_vars):
@@ -182,8 +181,6 @@ def generate_theharvester_yaml(env_vars):
 
     for service, fields in THEHARVESTER_MAPPING.items():
         lines.append(f"\n  {service}:")
-
-        # Check if ALL required env vars for this service exist and are not empty
         all_present = all(
             env_vars.get(env_var, "").strip() != "" for env_var in fields.values()
         )
@@ -191,12 +188,10 @@ def generate_theharvester_yaml(env_vars):
         for yaml_key, env_var in fields.items():
             if all_present:
                 value = env_vars.get(env_var).strip()
-                # Wrap in quotes if it contains spaces or special characters
                 if " " in value or ":" in value:
                     value = f'"{value}"'
                 lines.append(f"    {yaml_key}: {value}")
             else:
-                # Leave blank per instructions if missing or incomplete
                 lines.append(f"    {yaml_key}:")
 
     return "\n".join(lines) + "\n"
@@ -239,14 +234,12 @@ valkey:
 def check_container_stopped(container_name: str) -> bool:
     """Returns True if the container is stopped or doesn't exist."""
     try:
-        # Check if container is currently running
         result = subprocess.run(
             ["docker", "ps", "-q", "-f", f"name={container_name}"],
             capture_output=True,
             text=True,
             check=True,
         )
-        # If output is not empty, the container is running
         return not bool(result.stdout.strip())
     except subprocess.CalledProcessError:
         print(
@@ -274,14 +267,12 @@ def main():
     )
     args = parser.parse_args()
 
-    # Load environment variables
     env_vars = dotenv_values(DOTENV_PATH) if os.path.exists(DOTENV_PATH) else {}
     if not env_vars:
         print(
             f"[!] Warning: {DOTENV_PATH} not found or empty. Proceeding with empty values."
         )
 
-    # 1. Generate theHarvester & SearXNG File Configs
     harvester_content = generate_theharvester_yaml(env_vars)
     searxng_content = generate_searxng_yaml()
 
@@ -296,11 +287,9 @@ def main():
         print("=" * 60)
         print(searxng_content)
     else:
-        # Ensure directories exist
         os.makedirs(os.path.dirname(THEHARVESTER_OUT_PATH), exist_ok=True)
         os.makedirs(os.path.dirname(SEARXNG_OUT_PATH), exist_ok=True)
 
-        # Write files
         with open(THEHARVESTER_OUT_PATH, "w") as f:
             f.write(harvester_content)
         print(f"[+] Wrote theHarvester config to: {THEHARVESTER_OUT_PATH}")
@@ -309,8 +298,9 @@ def main():
             f.write(searxng_content)
         print(f"[+] Wrote SearXNG config to:      {SEARXNG_OUT_PATH}")
 
-    # 2. Seed SpiderFoot DB
-    # Safety Check: SQLite writes can corrupt/fail if the container has a write lock
+        # Initialize the global SQL DB
+        initialize_database()
+
     if not args.dry_run and not args.force:
         if not check_container_stopped(CONTAINER_NAME):
             print(f"[ERROR] The container '{CONTAINER_NAME}' appears to be running.")
@@ -328,7 +318,6 @@ def main():
         )
         sys.exit(1)
 
-    # Prepare data based on the mapping
     operations = []
     for sf_key, env_var in SPIDERFOOT_MAPPING.items():
         val = (env_vars.get(env_var) or "").strip()
@@ -340,7 +329,6 @@ def main():
             scope, opt = sf_key.split(":", 1)
             operations.append((scope, opt, val))
 
-    # Global options (SOCKS/Tor proxy)
     for opt, env_var in GLOBAL_OPTIONS.items():
         val = (env_vars.get(env_var) or "").strip()
         if val:
@@ -355,7 +343,6 @@ def main():
     if args.dry_run:
         print("\n=== DRY RUN MODE: No DB changes will be made ===")
         for scope, opt, val in operations:
-            # Mask the secret for display
             masked_val = val[:4] + "*" * (len(val) - 4) if len(val) > 4 else "***"
             print(
                 f"Would INSERT OR REPLACE -> Scope: {scope:<20} | Opt: {opt:<30} | Val: {masked_val}"
@@ -364,7 +351,6 @@ def main():
         print("[*] Dry run complete. No files or databases were written.")
         sys.exit(0)
 
-    # Execute DB insertions
     print(f"[*] Opening {DB_PATH} for writes...")
     conn = None
     try:

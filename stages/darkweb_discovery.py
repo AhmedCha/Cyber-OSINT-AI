@@ -27,6 +27,7 @@ from lib.common import setup_logging, slugify_company
 from lib.config import load_env_file, log_api_status_summary
 from lib.docker_runner import run_docker_tool
 from lib.json_utils import load_json, save_json
+from lib.db import get_db_connection, upsert_records
 
 logger = logging.getLogger(__name__)
 
@@ -303,6 +304,17 @@ def main() -> None:
         time.sleep(REQUEST_DELAY_SECONDS)
 
     save_json(output_file, results)
+
+    conn = get_db_connection()
+    upsert_records(
+        conn=conn,
+        table="raw_darkweb",
+        company_slug=company_slug,
+        records=results,
+        key_field="target",
+    )
+    conn.close()
+
     print_summary(len(results), hit_count, output_file)
 
 

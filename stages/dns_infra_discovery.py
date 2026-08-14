@@ -11,6 +11,7 @@ from lib.common import setup_logging, slugify_company
 from lib.json_utils import load_json, save_json
 from lib.network import normalize_subdomain
 from lib.docker_runner import run_docker_tool
+from lib.db import get_db_connection, upsert_records
 
 logger = logging.getLogger(__name__)
 
@@ -278,6 +279,14 @@ def main() -> None:
     save_json(output_file, infra_results, indent=2)
     save_json(raw_output_file, raw_results, indent=2)
 
+    # Reshape dictionary to a standardized list of records for the DB
+    db_records = [{"domain": k, "subdomains": v} for k, v in infra_results.items()]
+
+    try:
+        with get_db_connection() as conn:
+            upsert_records(conn, "raw_dns_infra", company_slug, db_records, "domain")
+    except Exception as e:
+        logger.warning(f"Database sync failed for raw_dns_infra: {e}")
     print_summary(summary_stats, output_file, raw_output_file)
 
 

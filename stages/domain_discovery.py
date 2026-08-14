@@ -12,6 +12,7 @@ from lib.config import log_api_status_summary
 from lib.docker_runner import run_docker_tool
 from lib.json_utils import load_json, save_json
 from lib.network import is_valid_domain_syntax, normalize_domain, resolves_dns
+from lib.db import get_db_connection, upsert_records
 
 logger = logging.getLogger(__name__)
 
@@ -331,6 +332,14 @@ def main() -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
     save_json(output_file, validated_domains, indent=2)
     save_json(raw_output_file, raw_by_target, indent=2)
+
+    try:
+        with get_db_connection() as conn:
+            upsert_records(
+                conn, "raw_domains", company_slug, validated_domains, "domain"
+            )
+    except Exception as e:
+        logger.warning(f"Database sync failed for raw_domains: {e}")
 
     print_summary(
         target_domains,

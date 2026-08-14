@@ -115,6 +115,7 @@ from lib.llm.darkweb import (
     DARKWEB_INSTRUCTIONS,
 )
 from lib.llm.documents import summarize_document
+from lib.db import get_db_connection, upsert_records
 
 try:
     from lib.config import load_env_file
@@ -125,6 +126,93 @@ except ImportError:  # pragma: no cover - keep this stage runnable standalone
 
 
 logger = logging.getLogger(__name__)
+
+
+def parse_arguments() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(
+        description="OSINT Stage: LLM-based noise filtering & document summarization"
+    )
+    parser.add_argument("--company", required=True, help="Target company name")
+    parser.add_argument("--model", default=DEFAULT_MODEL, help="Ollama model tag")
+    parser.add_argument(
+        "--ollama-host", default=DEFAULT_OLLAMA_HOST, help="Ollama API base URL"
+    )
+    parser.add_argument(
+        "--temperature",
+        type=float,
+        default=0.0,
+        help="Sampling temperature (0 = deterministic)",
+    )
+    parser.add_argument(
+        "--max-doc-chars",
+        type=int,
+        default=DEFAULT_MAX_DOC_CHARS,
+        help="Max characters of extracted document text sent to the model per document",
+    )
+    parser.add_argument(
+        "--timeout",
+        type=int,
+        default=DEFAULT_TIMEOUT,
+        help="Per-request timeout in seconds (raise this on slow/CPU-only hardware)",
+    )
+    parser.add_argument(
+        "--batch-size",
+        type=int,
+        default=DEFAULT_BATCH_SIZE,
+        help="Records per LLM call for domains/emails/employees/breaches passes "
+        "(lower this if calls are timing out)",
+    )
+    parser.add_argument(
+        "--debug",
+        action="store_true",
+        help="Stream the model's raw output live to the terminal as it generates, "
+        "with per-call timing/throughput stats",
+    )
+    parser.add_argument(
+        "--num-gpu",
+        type=int,
+        default=None,
+        help="Ollama num_gpu option: number of layers to offload to GPU for this request "
+        "(0 = force fully CPU-only, useful to test if GPU offload is unstable on this "
+        "machine). Omit to use the Ollama service's default.",
+    )
+    parser.add_argument(
+        "--num-ctx",
+        type=int,
+        default=None,
+        help="Ollama num_ctx option: context window size for this request. Omit to use "
+        "the model's default (commonly 4096).",
+    )
+    parser.add_argument(
+        "--num-predict",
+        type=int,
+        default=None,
+        help="Ollama num_predict option: caps max tokens generated per response, guards "
+        "against runaway generation on slow hardware.",
+    )
+    return parser.parse_args()
+
+
+def print_summary(
+    stats: Dict[str, int], warnings: List[str], output_file: Path
+) -> None:
+    print("\n" + "=" * 60)
+    print("               LLM FILTER SUMMARY")
+    print("=" * 60)
+    for label, value in stats.items():
+        print(f"{label:<28}: {value}")
+    if warnings:
+        print("-" * 60)
+        print(f"Warnings ({len(warnings)}):")
+        for w in warnings[:10]:
+            print(f"  - {w}")
+        if len(warnings) > 10:
+            print(
+                f"  ... and {len(warnings) - 10} more (see 'warnings' in output file)"
+            )
+    print("-" * 60)
+    print(f"Written: {output_file.resolve()}")
+    print("=" * 60 + "\n")
 
 
 def main() -> None:
@@ -444,94 +532,42 @@ def main() -> None:
     output_file = company_dir / "llm_filtered.json"
     save_json(output_file, output, indent=2)
 
+    # Save to Database
+    try:
+        conn = get_db_connection()
+
+        db_mapping = [
+            ("reviewed_domains", output.get("domains", {}).get("kept", []), "domain"),
+            (
+                "reviewed_infrastructure",
+                output.get("infrastructure_insights", {}).get("kept", []),
+                "target_domain",
+            ),
+            ("reviewed_emails", output.get("emails", {}).get("kept", []), "email"),
+            (
+                "reviewed_employees",
+                output.get("employees", {}).get("kept", []),
+                "identifier",
+            ),
+            ("reviewed_breaches", output.get("breaches", {}).get("kept", []), "email"),
+            (
+                "reviewed_darkweb",
+                output.get("darkweb", {}).get("kept", []),
+                "target_key",
+            ),
+            ("reviewed_documents", output.get("documents", []), "filename"),
+        ]
+
+        for table, records, key_field in db_mapping:
+            if records:
+                upsert_records(conn, table, company_slug, records, key_field)
+
+        conn.close()
+        logger.info("Successfully upserted LLM reviewed records to the database.")
+    except Exception as e:
+        logger.warning(f"Failed to upsert reviewed records to database: {e}")
+
     print_summary(output["stats"], warnings, output_file)
-
-
-def parse_arguments() -> argparse.Namespace:
-    parser = argparse.ArgumentParser(
-        description="OSINT Stage: LLM-based noise filtering & document summarization"
-    )
-    parser.add_argument("--company", required=True, help="Target company name")
-    parser.add_argument("--model", default=DEFAULT_MODEL, help="Ollama model tag")
-    parser.add_argument(
-        "--ollama-host", default=DEFAULT_OLLAMA_HOST, help="Ollama API base URL"
-    )
-    parser.add_argument(
-        "--temperature",
-        type=float,
-        default=0.0,
-        help="Sampling temperature (0 = deterministic)",
-    )
-    parser.add_argument(
-        "--max-doc-chars",
-        type=int,
-        default=DEFAULT_MAX_DOC_CHARS,
-        help="Max characters of extracted document text sent to the model per document",
-    )
-    parser.add_argument(
-        "--timeout",
-        type=int,
-        default=DEFAULT_TIMEOUT,
-        help="Per-request timeout in seconds (raise this on slow/CPU-only hardware)",
-    )
-    parser.add_argument(
-        "--batch-size",
-        type=int,
-        default=DEFAULT_BATCH_SIZE,
-        help="Records per LLM call for domains/emails/employees/breaches passes "
-        "(lower this if calls are timing out)",
-    )
-    parser.add_argument(
-        "--debug",
-        action="store_true",
-        help="Stream the model's raw output live to the terminal as it generates, "
-        "with per-call timing/throughput stats",
-    )
-    parser.add_argument(
-        "--num-gpu",
-        type=int,
-        default=None,
-        help="Ollama num_gpu option: number of layers to offload to GPU for this request "
-        "(0 = force fully CPU-only, useful to test if GPU offload is unstable on this "
-        "machine). Omit to use the Ollama service's default.",
-    )
-    parser.add_argument(
-        "--num-ctx",
-        type=int,
-        default=None,
-        help="Ollama num_ctx option: context window size for this request. Omit to use "
-        "the model's default (commonly 4096).",
-    )
-    parser.add_argument(
-        "--num-predict",
-        type=int,
-        default=None,
-        help="Ollama num_predict option: caps max tokens generated per response, guards "
-        "against runaway generation on slow hardware.",
-    )
-    return parser.parse_args()
-
-
-def print_summary(
-    stats: Dict[str, int], warnings: List[str], output_file: Path
-) -> None:
-    print("\n" + "=" * 60)
-    print("               LLM FILTER SUMMARY")
-    print("=" * 60)
-    for label, value in stats.items():
-        print(f"{label:<28}: {value}")
-    if warnings:
-        print("-" * 60)
-        print(f"Warnings ({len(warnings)}):")
-        for w in warnings[:10]:
-            print(f"  - {w}")
-        if len(warnings) > 10:
-            print(
-                f"  ... and {len(warnings) - 10} more (see 'warnings' in output file)"
-            )
-    print("-" * 60)
-    print(f"Written: {output_file.resolve()}")
-    print("=" * 60 + "\n")
 
 
 if __name__ == "__main__":

@@ -192,32 +192,52 @@ expects it somewhere else on disk.
 ```
 ├── configure_tools.py     # generates tool configs from .env (see above)
 ├── config.py               # reports which API keys are configured/missing
+├── inspect_sf_db.py         # one-off helper: inspect SpiderFoot's SQLite schema/rows
 ├── install_tools.sh        # one-time setup: build, configure, smoke-test
 ├── run_pipeline.sh         # runs the full pipeline for a company
+├── run_uncomplete.sh        # resumes a pipeline run from its last completed stage
+├── requirements.txt         # host-side Python dependencies
 ├── docker-compose.yaml     # all tool containers
 ├── dockerfiles/            # custom Dockerfiles for tools with no official image
 ├── SCHEMA.md               # shared database schema (see above)
 ├── lib/                    # shared helpers used across every stage
+│   ├── __init__.py
 │   ├── common.py           #   logging, slugify, name/abbreviation helpers
 │   ├── config.py           #   .env loading, API status reporting
 │   ├── db.py                #   shared SQLite database connection/upsert helpers
 │   ├── docker_runner.py    #   subprocess wrapper for `docker compose run`
+│   ├── json_utils.py        #   JSON load/save helpers used across every stage
 │   ├── network.py          #   domain validation, DNS, company-name matching
 │   ├── search.py           #   SearXNG querying, query-variant generation
 │   ├── apify_utils.py      #   Apify actor invocation
 │   ├── email_normalizer.py #   email validation/normalization
 │   ├── email_patterns.py   #   email pattern generation + infra-hostname filtering
 │   └── llm/                 #   one module per OSINT category for the LLM filter stage
+│       ├── __init__.py
 │       ├── config.py       #     Ollama defaults + shared anti-hallucination system prompt
 │       ├── client.py       #     low-level Ollama HTTP client (retry/streaming)
 │       ├── filter_pass.py  #     generic batched keep/exclude engine
 │       ├── utils.py        #     small helpers shared across category modules
 │       ├── output.py       #     fixed shape of llm_filtered.json
-│       └── domains.py, emails.py, employees.py, breaches.py,
-│           darkweb.py, documents.py, infrastructure.py
-│                          #     one module per category: compact_fn, verdict
-│                          #     schema, instructions, category-specific backstops
-├── stages/                 # the pipeline stages, run in order by run_pipeline.sh
+│       ├── domains.py, emails.py, employees.py, breaches.py,
+│       │   darkweb.py, documents.py, infrastructure.py
+│       │                  #     one module per category: compact_fn, verdict
+│       │                  #     schema, instructions, category-specific backstops
+├── stages/                 # the 12 core pipeline stages (run.sh order below),
+│                          #   plus the optional translate_report.py
+│   ├── __init__.py
+│   ├── name_to_domain.py    # company name -> candidate domain(s), DNS-verified
+│   ├── domain_discovery.py  # enrich via theHarvester + SpiderFoot, keep raw output
+│   ├── dns_infra_discovery.py # subdomains via Amass + CertSpotter API, IP/ASN/ISP
+│   ├── employee_discovery.py # LinkedIn employees via Apify, profiles via maigret
+│   ├── email_discovery.py   # candidate emails: tool-found + name-pattern guesses
+│   ├── email_validation.py  # SMTP check via Reacher, catch-all detection, Hunter fallback
+│   ├── document_discovery.py # public docs via Metagoofil + Apify web search
+│   ├── breach_lookup.py     # breach exposure via SpiderFoot (HIBP/IntelX) + Apify
+│   ├── darkweb_discovery.py # dark web mentions via SpiderFoot's Tor-routed modules
+│   ├── aggregate_results.py # merges every stage's output per company, tiers employees
+│   ├── llm_filter.py        # local LLM filtering pass -> llm_filtered.json
+│   ├── generate_report.py   # renders the final .docx report
 │   └── translate_report.py #   optional --language stage, see Usage above
 └── output/<company-slug>/  # per-company results, including the final .docx report
 ```

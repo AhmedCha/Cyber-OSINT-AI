@@ -1,0 +1,66 @@
+{% extends "base.html" %}
+
+{% block title %}{% if is_preview %}Preview Merge{% else %}Merge Results{% endif %} - OSINT Dashboard{% endblock %}
+
+{% block content %}
+<div class="preview-header">
+    <h2 class="preview-title">
+        {% if is_preview %}Merge Preview{% else %}Merge Executed Successfully{% endif %}
+    </h2>
+    <p class="text-muted preview-subtitle">
+        Source: <strong class="text-primary-strong">{{ source_slug }}</strong> 
+        &nbsp;&rarr;&nbsp; 
+        Target: <strong class="text-primary-strong">{{ target_slug }}</strong>
+    </p>
+</div>
+
+<div class="table-container">
+    <table>
+        <thead>
+            <tr>
+                <th>Table</th>
+                <th>Rows Moving</th>
+                <th>Collisions (Skipped)</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for table, info in breakdown.items() %}
+            <tr>
+                <td class="table-col-accent">{{ table }}</td>
+                <td>
+                    <span class="count-reviewed">{{ info.would_move - info.collisions|length }}</span> 
+                    <span class="text-muted">/ {{ info.would_move }}</span>
+                </td>
+                <td>
+                    {% if info.collisions %}
+                        <span class="count-raw font-bold">{{ info.collisions|length }} skipped</span>
+                        <ul class="text-muted collision-list">
+                            {% for key in info.collisions %}
+                                <li class="collision-item">{{ key }}</li>
+                            {% endfor %}
+                        </ul>
+                    {% else %}
+                        <span class="text-muted">None</span>
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</div>
+
+{% if is_preview %}
+<div class="action-buttons-row">
+    <form method="POST" action="/merge/execute">
+        <input type="hidden" name="source_slug" value="{{ source_slug }}">
+        <input type="hidden" name="target_slug" value="{{ target_slug }}">
+        <button type="submit" class="btn btn-confirm">Confirm Merge</button>
+    </form>
+    <a href="/merge" class="btn btn-cancel">Cancel</a>
+</div>
+{% else %}
+<div class="back-action">
+    <a href="/companies" class="btn btn-back">Back to Companies</a>
+</div>
+{% endif %}
+{% endblock %}

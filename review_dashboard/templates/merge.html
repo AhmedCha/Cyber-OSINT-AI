@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+
+{% block title %}Merge Companies - OSINT Review Dashboard{% endblock %}
+
+{% block content %}
+<div class="form-card">
+    <h2 class="form-title">Merge Companies</h2>
+    <p class="form-description">
+        Move all records from a source company to a target company. Any colliding records (same key) will be safely skipped and left behind under the source company.
+    </p>
+    
+    <form method="POST" action="/merge/preview" class="flex-column-form">
+        <div>
+            <label class="form-label">Source Company Slug:</label>
+            <input type="text" name="source_slug" required placeholder="e.g., old-company" class="form-input-text">
+        </div>
+        <div>
+            <label class="form-label">Target Company Slug:</label>
+            <input type="text" name="target_slug" required placeholder="e.g., new-company" class="form-input-text">
+        </div>
+        <button type="submit" class="btn btn-submit">Preview Merge</button>
+    </form>
+</div>
+{% endblock %}

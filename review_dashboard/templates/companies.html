@@ -1,0 +1,58 @@
+{% extends "base.html" %}
+
+{% block title %}Companies - OSINT Review Dashboard{% endblock %}
+
+{% block content %}
+<div style="display: flex; justify-content: space-between; align-items: center;">
+    <h2>Company Overview</h2>
+    <span style="color: var(--text-muted);">{{ companies|length }} Total Target Companies</span>
+</div>
+
+<div class="table-container">
+    {% if companies %}
+    <table>
+        <thead>
+            <tr>
+                <th>Company Slug</th>
+                <th>Total (Raw / Rev)</th>
+                <th>Domains</th>
+                <th>Emails</th>
+                <th>Employees</th>
+                <th>DNS Infra</th>
+                <th>Documents</th>
+                <th>Breaches</th>
+                <th>Darkweb</th>
+                <th>Action</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for company in companies %}
+            <tr>
+                <td><strong>{{ company.company_slug }}</strong></td>
+                <td>
+                    <span class="count-pair">
+                        <span class="count-raw">{{ company.total_raw }}</span> / 
+                        <span class="count-reviewed">{{ company.total_reviewed }}</span>
+                    </span>
+                </td>
+                <td><span class="count-pair">{{ company.raw_domains }} / {{ company.reviewed_domains }}</span></td>
+                <td><span class="count-pair">{{ company.raw_emails }} / {{ company.reviewed_emails }}</span></td>
+                <td><span class="count-pair">{{ company.raw_employees }} / {{ company.reviewed_employees }}</span></td>
+                <td><span class="count-pair">{{ company.raw_dns_infra }} / {{ company.reviewed_infrastructure }}</span></td>
+                <td><span class="count-pair">{{ company.raw_documents }} / {{ company.reviewed_documents }}</span></td>
+                <td><span class="count-pair">{{ company.raw_breaches }} / {{ company.reviewed_breaches }}</span></td>
+                <td><span class="count-pair">{{ company.raw_darkweb }} / {{ company.reviewed_darkweb }}</span></td>
+                <td>
+                    <a href="/companies/{{ company.company_slug }}" class="btn">Review &rarr;</a>
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+    {% else %}
+    <div class="empty-state">
+        <p>No target company records present in database.</p>
+    </div>
+    {% endif %}
+</div>
+{% endblock %}

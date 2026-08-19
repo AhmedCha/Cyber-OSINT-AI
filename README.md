@@ -182,7 +182,7 @@ Full schema (table names, columns, and which field is used as each
 table's natural key) is documented in `SCHEMA.md`.
 
 By default the database lives at `output/osint_shared.db`; override the
-location with `OSINT_SHARED_DB_PATH` in `.env` if a consuming project
+location with `OSINT_DB_PATH` in `.env` if a consuming project
 expects it somewhere else on disk.
 
 ---

@@ -4,6 +4,8 @@ import requests
 import json
 import argparse
 import logging
+import time
+import re
 from pathlib import Path
 from typing import Any, Dict, List, Set, Tuple
 
@@ -15,6 +17,8 @@ from lib.db import get_db_connection, upsert_records
 
 logger = logging.getLogger(__name__)
 
+# Global cache for IP enrichment to avoid re-querying across multiple domains
+IP_ENRICHMENT_CACHE: Dict[str, Dict[str, Any]] = {}
 
 # =====================================================================
 # DOCKER TOOL EXECUTORS
@@ -61,29 +65,61 @@ def run_certspotter(domain: str) -> Tuple[List[str], Any]:
         return [], []
 
 
+def enrich_ip_with_asn(ip: str) -> Dict[str, Any]:
+    """
+    Queries ip-api.com for ASN/ISP data to replace the missing Amass address data.
+    Respects the 45 RPM limit for the free API tier.
+    """
+    if ip in IP_ENRICHMENT_CACHE:
+        return IP_ENRICHMENT_CACHE[ip]
+
+    url = f"http://ip-api.com/json/{ip}?fields=as,isp,org,query"
+    try:
+        # Enforce rate limit (~1.33 seconds per request ensures max 45 requests/minute)
+        time.sleep(1.35)
+        response = requests.get(url, timeout=10)
+
+        if response.status_code == 200:
+            data = response.json()
+            result = {
+                "asn": data.get("as"),
+                "description": data.get("isp") or data.get("org"),
+                "cidr": None,  # Note: The free ip-api tier does not provide native CIDR blocks
+            }
+            IP_ENRICHMENT_CACHE[ip] = result
+            return result
+        else:
+            logger.error(
+                f"[!] ip-api returned status code {response.status_code} for IP {ip}"
+            )
+    except Exception as e:
+        logger.error(f"[!] Error enriching IP {ip}: {e}")
+
+    # Fallback to empty state on failure
+    failed_result = {"asn": None, "description": None, "cidr": None}
+    IP_ENRICHMENT_CACHE[ip] = failed_result
+    return failed_result
+
+
 def run_amass(domain: str, temp_dir: str) -> Tuple[List[str], Any, Any]:
-    """
-    Runs Amass in JSON output mode inside a Docker container.
-    Returns: (list_of_subdomains, raw_amass_json_list, surfaced_network_info)
-    """
-    json_output_filename = f"amass_{domain}.json"
-    json_output_path = os.path.join(temp_dir, json_output_filename)
+    abs_temp_dir = os.path.abspath(temp_dir)
+    txt_output_filename = f"amass_{domain}.txt"
+    txt_output_path = os.path.join(abs_temp_dir, txt_output_filename)
 
     cmd_args = [
         "-v",
-        f"{temp_dir}:/tmp",
+        f"{abs_temp_dir}:/tmp",
         "amass",
         "enum",
         "-passive",
         "-d",
         domain,
-        "-json",
-        f"/tmp/{json_output_filename}",
+        "-o",
+        f"/tmp/{txt_output_filename}",
     ]
 
     logger.info(f"[*] Running Amass (passive) for {domain}...")
 
-    # Use run_docker_tool; do not silently swallow output (capture_stdout instead of DEVNULL)
     result = run_docker_tool(
         tool_name="amass",
         extra_args=cmd_args,
@@ -96,50 +132,66 @@ def run_amass(domain: str, temp_dir: str) -> Tuple[List[str], Any, Any]:
         logger.error(f"[!] Amass run failed or timed out for {domain}.")
 
     subdomains: Set[str] = set()
-    raw_data: List[Dict[str, Any]] = []
+    raw_data: List[Dict[str, str]] = []
     surfaced_network_info: Dict[str, Any] = {}
 
-    if os.path.exists(json_output_path):
-        with open(json_output_path, "r") as f:
+    # Standard Amass v4 graph relation output: sub.domain.com (FQDN) --> a_record --> 1.2.3.4 (IPAddress)
+    relation_pattern = re.compile(
+        r"^(.*?)\s+\(FQDN\)\s+-->\s+(a_record|aaaa_record)\s+-->\s+(.*?)\s+\(IPAddress\)"
+    )
+
+    if os.path.exists(txt_output_path):
+        with open(txt_output_path, "r") as f:
             for line in f:
-                if not line.strip():
+                line = line.strip()
+                if not line:
                     continue
-                try:
-                    record = json.loads(line)
-                    raw_data.append(record)
 
-                    # Extract subdomain
-                    name = record.get("name")
-                    if name:
-                        subdomains.add(name)
+                match = relation_pattern.search(line)
+                if match:
+                    hostname = match.group(1).strip()
+                    record_type = match.group(2).strip()
+                    ip_address = match.group(3).strip()
 
-                    # Surface IPs and ASN/ISP info explicitly
-                    if "addresses" in record:
-                        for addr in record["addresses"]:
-                            ip = addr.get("ip")
-                            if ip and ip not in surfaced_network_info:
-                                surfaced_network_info[ip] = {
-                                    "asn": addr.get("asn"),
-                                    "description": addr.get("desc"),
-                                    "cidr": addr.get("cidr"),
-                                    "related_hostnames": [name] if name else [],
-                                }
-                            elif (
-                                ip in surfaced_network_info
-                                and name
-                                and name
-                                not in surfaced_network_info[ip]["related_hostnames"]
-                            ):
-                                surfaced_network_info[ip]["related_hostnames"].append(
-                                    name
-                                )
+                    subdomains.add(hostname)
 
-                except json.JSONDecodeError:
-                    continue
+                    # Formulate an alternative raw record matching expectation
+                    raw_data.append(
+                        {
+                            "hostname": hostname,
+                            "record_type": record_type,
+                            "ip": ip_address,
+                            "raw_line": line,
+                        }
+                    )
+
+                    # Accumulate IPs for later enrichment
+                    if ip_address not in surfaced_network_info:
+                        surfaced_network_info[ip_address] = {
+                            "related_hostnames": [hostname]
+                        }
+                    elif (
+                        hostname
+                        not in surfaced_network_info[ip_address]["related_hostnames"]
+                    ):
+                        surfaced_network_info[ip_address]["related_hostnames"].append(
+                            hostname
+                        )
     else:
         logger.error(
-            f"[!] No Amass output file found at {json_output_path}. Execution may have failed."
+            f"[!] No Amass output file found at {txt_output_path}. Execution may have failed."
         )
+
+    # Enrich extracted IPs with external ASN/ISP context
+    if surfaced_network_info:
+        logger.info(
+            f"[*] Enriching {len(surfaced_network_info)} unique IPs found by Amass..."
+        )
+        for ip, network_info in surfaced_network_info.items():
+            enrichment = enrich_ip_with_asn(ip)
+            network_info["asn"] = enrichment.get("asn")
+            network_info["description"] = enrichment.get("description")
+            network_info["cidr"] = enrichment.get("cidr")
 
     return list(subdomains), raw_data, surfaced_network_info
 
@@ -279,14 +331,20 @@ def main() -> None:
     save_json(output_file, infra_results, indent=2)
     save_json(raw_output_file, raw_results, indent=2)
 
-    # Reshape dictionary to a standardized list of records for the DB
-    db_records = [{"domain": k, "subdomains": v} for k, v in infra_results.items()]
+    # Reshape raw_results into standardized records for raw_dns_infra tier
+    db_records = [
+        {"domain": domain, **raw_data} for domain, raw_data in raw_results.items()
+    ]
 
     try:
-        with get_db_connection() as conn:
+        conn = get_db_connection()
+        try:
             upsert_records(conn, "raw_dns_infra", company_slug, db_records, "domain")
+        finally:
+            conn.close()
     except Exception as e:
         logger.warning(f"Database sync failed for raw_dns_infra: {e}")
+
     print_summary(summary_stats, output_file, raw_output_file)
 
 

@@ -19,6 +19,7 @@ NC='\033[0m' # No Color
 # =====================================================================
 cleanup() {
   echo -e "\n${BLUE}[INFO] Pipeline finished or interrupted. Cleaning up persistent background services...${NC}"
+  # Defensively attempt to stop all managed persistent services
   docker compose stop reacher tor searxng valkey 2>/dev/null || true
 }
 # Catch normal exit, CTRL+C (SIGINT), and script errors (SIGTERM/ERR)
@@ -43,9 +44,53 @@ STAGES=(
   "Generate Report:generate_report.py"
 )
 
+# Service mapping matching required persistent services per script
+# Note: searxng intrinsically depends on valkey and tor in docker-compose.yaml,
+# so 'docker compose up -d searxng' auto-starts them too.
+declare -A STAGE_SERVICES=(
+  ["name_to_domain.py"]="searxng"
+  ["domain_discovery.py"]="tor"
+  ["dns_infra_discovery.py"]=""
+  ["employee_discovery.py"]="tor"
+  ["email_discovery.py"]="tor"
+  ["email_validation.py"]="reacher"
+  ["document_discovery.py"]=""
+  ["breach_lookup.py"]="tor"
+  ["darkweb_discovery.py"]="tor"
+  ["aggregate_results.py"]=""
+  ["llm_filter.py"]=""
+  ["generate_report.py"]=""
+  ["translate_report.py"]=""
+)
+
 # =====================================================================
 # HELPER FUNCTIONS
 # =====================================================================
+
+wait_for_reacher() {
+  echo -e "${BLUE}[INFO] Waiting for Reacher API service readiness...${NC}"
+  until curl -s http://localhost:8081/v0/check_email -X POST -H "Content-Type: application/json" -d '{"to_email":"test@example.com"}' >/dev/null 2>&1; do
+    sleep 1
+  done
+  echo -e "${GREEN}[INFO] Reacher service is ready!${NC}\n"
+}
+
+wait_for_searxng() {
+  echo -e "${BLUE}[INFO] Waiting for SearXNG service readiness...${NC}"
+  until curl -s http://localhost:8080/healthz >/dev/null 2>&1; do
+    sleep 1
+  done
+  echo -e "${GREEN}[INFO] SearXNG service is ready!${NC}\n"
+}
+
+wait_for_tor() {
+  echo -e "${BLUE}[INFO] Waiting for Tor SOCKS proxy readiness (can take longer than other services while circuits build)...${NC}"
+  until curl -s --socks5-hostname 127.0.0.1:9052 --max-time 15 \
+    http://2gzyxa5ihm7nsggfxnu52rck2vv4rvmdlkiu3zzui5du4xyclen53wid.onion/ >/dev/null 2>&1; do
+    sleep 2
+  done
+  echo -e "${GREEN}[INFO] Tor SOCKS proxy is ready!${NC}\n"
+}
 
 # Format time in MM:SS for better readability
 format_time() {
@@ -163,55 +208,64 @@ if [[ -n "${LANGUAGE_CODE}" ]]; then
 fi
 
 PIPELINE_START=$(date +%s)
-
-# =====================================================================
-# START PERSISTENT SERVICES GLOBALLY
-# =====================================================================
-echo -e "${BLUE}[INFO] Starting persistent backend services (Reacher, Tor, SearXNG)...${NC}"
-docker compose up -d reacher tor searxng
-
-# Wait briefly for Reacher HTTP server to start listening
-echo -e "${BLUE}[INFO] Waiting for Reacher API service readiness...${NC}"
-until curl -s http://localhost:8081/v0/check_email -X POST -H "Content-Type: application/json" -d '{"to_email":"test@example.com"}' >/dev/null 2>&1; do
-  sleep 1
-done
-echo -e "${GREEN}[INFO] Reacher service is ready!${NC}\n"
-
-# Wait briefly for SearXNG HTTP server to start listening
-echo -e "${BLUE}[INFO] Waiting for SearXNG service readiness...${NC}"
-until curl -s http://localhost:8080/healthz >/dev/null 2>&1; do
-  sleep 1
-done
-echo -e "${GREEN}[INFO] SearXNG service is ready!${NC}\n"
-
-# Wait for the Tor SOCKS proxy to be genuinely usable
-echo -e "${BLUE}[INFO] Waiting for Tor SOCKS proxy readiness (can take longer than other services while circuits build)...${NC}"
-until curl -s --socks5-hostname 127.0.0.1:9052 --max-time 15 \
-  http://2gzyxa5ihm7nsggfxnu52rck2vv4rvmdlkiu3zzui5du4xyclen53wid.onion/ >/dev/null 2>&1; do
-  sleep 2
-done
-echo -e "${GREEN}[INFO] Tor SOCKS proxy is ready!${NC}\n"
+RUNNING_SERVICES=""
 
 # =====================================================================
 # RUN PIPELINE STAGES
 # =====================================================================
+
+# Automatically load environment variables if .env exists
+if [[ -f ".env" ]]; then
+  set -a
+  source .env
+  set +a
+fi
+
 for i in "${!STAGES[@]}"; do
   STAGE_INFO="${STAGES[$i]}"
   STAGE_NAME="${STAGE_INFO%%:*}"
   SCRIPT_NAME="${STAGE_INFO#*:}"
   STAGE_NUM=$((i + 1))
 
+  REQ_SERVICES="${STAGE_SERVICES[$SCRIPT_NAME]:-}"
+
+  # Look ahead to see if the next sequential stage shares the exact same service requirements
+  NEXT_SERVICES=""
+  if [[ $((i + 1)) -lt ${#STAGES[@]} ]]; then
+    NEXT_STAGE_INFO="${STAGES[$((i + 1))]}"
+    NEXT_SCRIPT_NAME="${NEXT_STAGE_INFO#*:}"
+    NEXT_SERVICES="${STAGE_SERVICES[$NEXT_SCRIPT_NAME]:-}"
+  fi
+
+  # 1. Startup phase
+  if [[ -n "$REQ_SERVICES" && "$RUNNING_SERVICES" != "$REQ_SERVICES" ]]; then
+    echo -e "${BLUE}[INFO] Starting required services for ${STAGE_NAME}: ${REQ_SERVICES}${NC}"
+    docker compose up -d $REQ_SERVICES
+
+    if [[ "$REQ_SERVICES" == *"reacher"* ]]; then wait_for_reacher; fi
+    if [[ "$REQ_SERVICES" == *"searxng"* ]]; then wait_for_searxng; fi
+    if [[ "$REQ_SERVICES" == *"tor"* ]]; then wait_for_tor; fi
+
+    RUNNING_SERVICES="$REQ_SERVICES"
+  fi
+
+  # 2. Run the current stage
   run_stage "$STAGE_NUM" "$TOTAL_STAGES" "$STAGE_NAME" "$SCRIPT_NAME" "$COMPANY"
 
-  # Optional: translate the report immediately after it's generated, if
-  # --language was passed. Entirely isolated - only runs when requested,
-  # and doesn't affect the numbered stage sequence above.
+  # 3. Optional: translate the report conditionally
   if [[ "$SCRIPT_NAME" == "generate_report.py" && -n "${LANGUAGE_CODE}" ]]; then
     run_stage "$STAGE_NUM" "$TOTAL_STAGES" "Translate Report (${LANGUAGE_CODE})" \
       "translate_report.py" "$COMPANY" --language "${LANGUAGE_CODE}"
   fi
 
-  # Trigger the manual inspection pause function
+  # 4. Teardown phase (avoids unnecessary stop/starts by checking next stage)
+  if [[ -n "$RUNNING_SERVICES" && "$RUNNING_SERVICES" != "$NEXT_SERVICES" ]]; then
+    echo -e "${BLUE}[INFO] Stopping services (no longer required by next stage): ${RUNNING_SERVICES}${NC}"
+    docker compose stop $RUNNING_SERVICES
+    RUNNING_SERVICES=""
+  fi
+
+  # 5. Manual inspection pause
   pause_step
 done
 

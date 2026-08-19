@@ -34,17 +34,23 @@ def load_env_file(env_path: Union[Path, str] = ".env") -> None:
 
 
 def log_api_status_summary() -> None:
-    """Logs the configuration status of key OSINT API keys present in environment variables."""
-    api_keys = [
-        "SHODAN_API_KEY",
-        "CENSYS_API_KEY",
-        "VIRUSTOTAL_API_KEY",
-        "SECURITYTRAILS_API_KEY",
-        "HUNTER_API_KEY",
-    ]
-    status = {key: bool(os.getenv(key)) for key in api_keys}
-    configured = [k for k, v in status.items() if v]
+    """Logs the status of API/Secret keys and outputs the database location."""
+    keywords = ("KEY", "SECRET", "API")
+
+    # Find all env variables matching keywords
+    matching_keys = [k for k in os.environ if any(kw in k.upper() for kw in keywords)]
+
+    # Check which variables have a non-empty string value
+    configured = [k for k in matching_keys if os.getenv(k, "").strip()]
+
     logger.info(
-        f"API Key Status: {len(configured)}/{len(api_keys)} configured "
-        f"({', '.join(configured) if configured else 'None'})"
+        f"API Key Status: {len(configured)}/{len(matching_keys)} configured "
+        f"({', '.join(sorted(configured)) if configured else 'None'})"
     )
+
+    # Log database location
+    db_path = os.getenv("OSINT_DB_PATH")
+    if db_path:
+        logger.info(f"Database Path: {db_path}")
+    else:
+        logger.warning("Database Path (OSINT_DB_PATH): Not configured in environment")

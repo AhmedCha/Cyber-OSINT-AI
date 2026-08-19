@@ -20,18 +20,17 @@ RAW_TO_REVIEWED = {
 
 
 def get_db_connection() -> sqlite3.Connection:
-    """Returns a connection to the shared OSINT database."""
-    db_path = os.environ.get("OSINT_SHARED_DB_PATH", "output/osint_shared.db")
+    """Returns a read-only connection to the shared OSINT database."""
+    db_path = os.environ.get("OSINT_DB_PATH")
+    if not db_path or not os.path.exists(db_path):
+        raise FileNotFoundError(f"Database not found at {db_path}")
 
-    db_dir = os.path.dirname(db_path)
-    if db_dir:
-        os.makedirs(db_dir, exist_ok=True)
+    # Connect with a 30-second timeout in case the OSINT pipeline is writing
+    # URI mode requires the path to be formatted properly for read-only access.
+    db_uri = f"file:{os.path.abspath(db_path)}?mode=rw"
+    conn = sqlite3.connect(db_uri, timeout=30.0, uri=True)
 
-    # Add timeout=30.0 to wait up to 30 seconds if the DB is locked by another process
-    conn = sqlite3.connect(db_path, timeout=30.0)
-
-    # Enable WAL mode for concurrent multi-project reading and writing
-    conn.execute("PRAGMA journal_mode=WAL;")
+    # Use Row factory for dictionary-like access to results
     conn.row_factory = sqlite3.Row
     return conn
 

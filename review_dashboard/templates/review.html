@@ -5,89 +5,105 @@
 {% block content %}
 <div class="header-bar">
     <h2>Review Target: {{ slug }}</h2>
-    <a href="/companies" class="back-link">&larr; Back to Overview</a>
+    <div style="display: flex; gap: 1.5rem; align-items: center;">
+        <label style="cursor: pointer; display: flex; align-items: center; gap: 0.5rem; color: var(--text-muted); font-weight: 600;">
+            <!-- Toggle for hiding approved records, checked by default -->
+            <input type="checkbox" id="toggle-approved" checked onchange="toggleApprovedRecords()"> Hide Approved
+        </label>
+        <a href="/companies" class="back-link">&larr; Back to Overview</a>
+    </div>
 </div>
 
 {% for table, records in tables_data.items() %}
+<!-- Strip raw_ and reviewed_ from the table name and make it uppercase -->
+{% set clean_table_name = table | replace('raw_', '') | replace('reviewed_', '') | replace('_', ' ') | upper %}
+
 <div class="table-section">
-    <h3 class="table-title">{{ table }} ({{ records|length }})</h3>
+    <!-- Clickable table title for collapse/expand -->
+    <h3 class="table-title" onclick="toggleTableContent('{{ table }}')" style="cursor: pointer; display: flex; align-items: center; gap: 8px;">
+        <span id="indicator-{{ table }}">▼</span> {{ clean_table_name }} ({{ records|length }})
+    </h3>
     
-    {% if not records %}
-        <p class="empty-table-msg">No records found in this table.</p>
-    {% else %}
-        {% for record in records %}
-        <div class="record-card">
-            <div class="record-header">
-                <span title="Record Key">🔑 {{ record.record_key }}</span>
-                {% if record.status == 'approved' %}
-                    <span class="badge badge-approved">Approved</span>
-                {% elif record.status == 'rejected' %}
-                    <span class="badge badge-rejected">Rejected</span>
-                {% else %}
-                    <span class="badge badge-pending">Pending</span>
-                {% endif %}
-            </div>
-            
-            <div class="record-body">
-                <!-- Hidden raw store for JavaScript renderer -->
-                <script type="application/json" id="json-data-{{ table }}-{{ loop.index }}">
-                    {{ record.json_string | safe }}
-                </script>
+    <!-- Wrapper div to toggle table visibility -->
+    <div id="content-{{ table }}">
+        {% if not records %}
+            <p class="empty-table-msg">No records found in this table.</p>
+        {% else %}
+            {% for record in records %}
+            <!-- Added record-status class to allow JS filtering -->
+            <div class="record-card record-status-{{ record.status or 'pending' }}">
+                <div class="record-header">
+                    <span title="Record Key">🔑 {{ record.record_key }}</span>
+                    {% if record.status == 'approved' %}
+                        <span class="badge badge-approved">Approved</span>
+                    {% elif record.status == 'rejected' %}
+                        <span class="badge badge-rejected">Rejected</span>
+                    {% else %}
+                        <span class="badge badge-pending">Pending</span>
+                    {% endif %}
+                </div>
+                
+                <div class="record-body">
+                    <!-- Hidden raw store for JavaScript renderer -->
+                    <script type="application/json" id="json-data-{{ table }}-{{ loop.index }}">
+                        {{ record.json_string | safe }}
+                    </script>
 
-                <!-- Human Readable Display -->
-                <div id="view-{{ table }}-{{ loop.index }}"></div>
+                    <!-- Human Readable Display -->
+                    <div id="view-{{ table }}-{{ loop.index }}"></div>
 
-                {% if not record.status %}
-                    <div class="actions-bar">
-                        <form method="POST" action="/companies/{{ slug }}/approve" class="inline-form">
-                            <input type="hidden" name="raw_table" value="{{ table }}">
-                            <input type="hidden" name="record_key" value="{{ record.record_key }}">
-                            <button type="submit" class="btn btn-approve">Approve As-Is</button>
-                        </form>
-                        
-                        <button type="button" class="btn btn-edit" onclick="toggleEdit('{{ table }}', '{{ loop.index }}')">
-                            Edit before Approving
+                    {% if not record.status %}
+                        <div class="actions-bar">
+                            <form method="POST" action="/companies/{{ slug }}/approve" class="inline-form">
+                                <input type="hidden" name="raw_table" value="{{ table }}">
+                                <input type="hidden" name="record_key" value="{{ record.record_key }}">
+                                <button type="submit" class="btn btn-approve">Approve As-Is</button>
+                            </form>
+                            
+                            <button type="button" class="btn btn-edit" onclick="toggleEdit('{{ table }}', '{{ loop.index }}')">
+                                Edit before Approving
+                            </button>
+                            
+                            <form method="POST" action="/companies/{{ slug }}/reject" class="inline-form">
+                                <input type="hidden" name="raw_table" value="{{ table }}">
+                                <input type="hidden" name="record_key" value="{{ record.record_key }}">
+                                <button type="submit" class="btn btn-reject">Reject</button>
+                            </form>
+                        </div>
+
+                        <!-- Edit Section with Friendly Labeled Inputs -->
+                        <div id="edit-{{ table }}-{{ loop.index }}" class="edit-section">
+                            <form method="POST" action="/companies/{{ slug }}/approve" onsubmit="prepareEditSubmission(event, '{{ table }}', '{{ loop.index }}')">
+                                <input type="hidden" name="raw_table" value="{{ table }}">
+                                <input type="hidden" name="record_key" value="{{ record.record_key }}">
+                                <input type="hidden" name="edited_data" id="edited-data-{{ table }}-{{ loop.index }}">
+                                
+                                <h4 class="edit-title">Edit Field Values</h4>
+                                
+                                <div id="edit-fields-{{ table }}-{{ loop.index }}">
+                                    <!-- Dynamic Form Inputs generated by JS -->
+                                </div>
+
+                                <div class="edit-actions">
+                                    <button type="button" class="btn btn-edit" onclick="toggleEdit('{{ table }}', '{{ loop.index }}')">Cancel</button>
+                                    <button type="submit" class="btn btn-approve">Submit Edits & Approve</button>
+                                </div>
+                            </form>
+                        </div>
+                    {% endif %}
+
+                    <!-- Optional Raw Technical View Toggle -->
+                    <div>
+                        <button type="button" class="raw-toggle-btn" onclick="toggleRawView('{{ table }}', '{{ loop.index }}')">
+                            Show Technical Raw Data
                         </button>
-                        
-                        <form method="POST" action="/companies/{{ slug }}/reject" class="inline-form">
-                            <input type="hidden" name="raw_table" value="{{ table }}">
-                            <input type="hidden" name="record_key" value="{{ record.record_key }}">
-                            <button type="submit" class="btn btn-reject">Reject</button>
-                        </form>
+                        <pre id="raw-view-{{ table }}-{{ loop.index }}" class="raw-json-view"><code>{{ record.json_string }}</code></pre>
                     </div>
-
-                    <!-- Edit Section with Friendly Labeled Inputs -->
-                    <div id="edit-{{ table }}-{{ loop.index }}" class="edit-section">
-                        <form method="POST" action="/companies/{{ slug }}/approve" onsubmit="prepareEditSubmission(event, '{{ table }}', '{{ loop.index }}')">
-                            <input type="hidden" name="raw_table" value="{{ table }}">
-                            <input type="hidden" name="record_key" value="{{ record.record_key }}">
-                            <input type="hidden" name="edited_data" id="edited-data-{{ table }}-{{ loop.index }}">
-                            
-                            <h4 class="edit-title">Edit Field Values</h4>
-                            
-                            <div id="edit-fields-{{ table }}-{{ loop.index }}">
-                                <!-- Dynamic Form Inputs generated by JS -->
-                            </div>
-
-                            <div class="edit-actions">
-                                <button type="button" class="btn btn-edit" onclick="toggleEdit('{{ table }}', '{{ loop.index }}')">Cancel</button>
-                                <button type="submit" class="btn btn-approve">Submit Edits & Approve</button>
-                            </div>
-                        </form>
-                    </div>
-                {% endif %}
-
-                <!-- Optional Raw Technical View Toggle -->
-                <div>
-                    <button type="button" class="raw-toggle-btn" onclick="toggleRawView('{{ table }}', '{{ loop.index }}')">
-                        Show Technical Raw Data
-                    </button>
-                    <pre id="raw-view-{{ table }}-{{ loop.index }}" class="raw-json-view"><code>{{ record.json_string }}</code></pre>
                 </div>
             </div>
-        </div>
-        {% endfor %}
-    {% endif %}
+            {% endfor %}
+        {% endif %}
+    </div>
 </div>
 {% endfor %}
 

@@ -87,6 +87,14 @@ fi
 
 UVICORN_CMD=(python3 -m uvicorn review_dashboard.backend:app --host "${HOST}" --port "${PORT}")
 
+# Check for .env file to ensure database paths and API keys are loaded
+if [[ -f ".env" ]]; then
+  UVICORN_CMD+=(--env-file ".env")
+  echo -e "${GREEN}[INFO] Found .env file, passing to Uvicorn.${NC}"
+else
+  echo -e "${YELLOW}[WARNING] No .env file found in the current directory. Make sure OSINT_DB_PATH is exported manually!${NC}"
+fi
+
 if [[ "${RELOAD}" == true ]]; then
   UVICORN_CMD+=(--reload)
   echo -e "${YELLOW}[INFO] Auto-reload mode enabled.${NC}"
